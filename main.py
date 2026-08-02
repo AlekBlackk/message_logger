@@ -82,54 +82,59 @@ async def retention_loop(cfg: Config, storage: Storage) -> None:
 async def run(cfg: Config) -> None:
     storage = Storage(cfg.db_path)
     client = build_client(cfg)
-    await client.start()
-    log.info("connected as %s", utils.get_display_name(await client.get_me()))
-
-    log_target_id = utils.get_peer_id(await client.get_entity(cfg.log_target))
-    watch_ids = await resolve_peer_ids(client, cfg.watch_chats)
-    ignore_ids = await resolve_peer_ids(client, cfg.ignore_chats)
-    ignore_ids.add(log_target_id)  # never cache our own reports
-    log.info(
-        "log target %s, watching %s chats, ignoring %s chats",
-        log_target_id,
-        len(watch_ids) or "all",
-        len(ignore_ids),
-    )
-
-    logger = MessageLogger(
-        client=client,
-        storage=storage,
-        config=cfg,
-        log_target_id=log_target_id,
-        watch_ids=watch_ids,
-        ignore_ids=ignore_ids,
-    )
-    logger.register()
-
-    stop = asyncio.Event()
-
-    def request_stop(*_args) -> None:
-        log.info("shutdown requested")
-        stop.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            signal.signal(sig, request_stop)
-        except (ValueError, OSError, AttributeError):
-            pass
-
-    retention_task = asyncio.create_task(retention_loop(cfg, storage))
+    retention_task: asyncio.Task | None = None
     try:
-        # Poll instead of a bare stop.wait(): on Windows the loop must wake up
-        # regularly for a Ctrl+C signal handler to run at all.
-        while not stop.is_set() and client.is_connected():
+        await client.start()
+        log.info("connected as %s", utils.get_display_name(await client.get_me()))
+
+        log_target_id = utils.get_peer_id(await client.get_entity(cfg.log_target))
+        watch_ids = await resolve_peer_ids(client, cfg.watch_chats)
+        ignore_ids = await resolve_peer_ids(client, cfg.ignore_chats)
+        ignore_ids.add(log_target_id)  # never cache our own reports
+        log.info(
+            "log target %s, watching %s chats, ignoring %s chats",
+            log_target_id,
+            len(watch_ids) or "all",
+            len(ignore_ids),
+        )
+
+        logger = MessageLogger(
+            client=client,
+            storage=storage,
+            config=cfg,
+            log_target_id=log_target_id,
+            watch_ids=watch_ids,
+            ignore_ids=ignore_ids,
+        )
+        logger.register()
+
+        stop = asyncio.Event()
+
+        def request_stop(*_args) -> None:
+            log.info("shutdown requested")
+            stop.set()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, request_stop)
+            except (ValueError, OSError, AttributeError):
+                pass
+
+        retention_task = asyncio.create_task(retention_loop(cfg, storage))
+        # Poll rather than awaiting a single future: on Windows the loop must
+        # wake up regularly for a Ctrl+C signal handler to run at all.
+        # client.disconnected (not is_connected()) is the exit signal — it
+        # resolves only once Telethon has given up reconnecting, so a transient
+        # network drop no longer shuts the bot down.
+        while not stop.is_set() and not client.disconnected.done():
             await asyncio.sleep(1)
     finally:
-        retention_task.cancel()
-        try:
-            await retention_task
-        except asyncio.CancelledError:
-            pass
+        if retention_task is not None:
+            retention_task.cancel()
+            try:
+                await retention_task
+            except asyncio.CancelledError:
+                pass
         await client.disconnect()
         storage.close()
         log.info("stopped cleanly")
