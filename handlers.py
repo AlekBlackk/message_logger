@@ -17,34 +17,6 @@ from storage import Storage, StoredMessage
 log = logging.getLogger(__name__)
 
 
-def _display_name(entity) -> str | None:
-    """Duck-typed name resolution — works for real Telethon entities and test doubles alike.
-
-    telethon.utils.get_display_name() does strict isinstance checks against
-    types.User/Chat/Channel, so it silently returns '' for anything else (including
-    plain stand-ins used in tests). Users/chats/channels all carry the same
-    first_name/last_name/title/username fields directly, so reading them by
-    attribute gets the same result without the isinstance gate.
-    """
-    if entity is None:
-        return None
-    first = getattr(entity, "first_name", None)
-    last = getattr(entity, "last_name", None)
-    if first and last:
-        return f"{first} {last}"
-    if first:
-        return first
-    if last:
-        return last
-    title = getattr(entity, "title", None)
-    if title:
-        return title
-    username = getattr(entity, "username", None)
-    if username:
-        return username
-    return None
-
-
 class MessageLogger:
     def __init__(
         self,
@@ -87,13 +59,13 @@ class MessageLogger:
         """Fill the in-memory caches from entities Telethon ships with the update."""
         sender = getattr(event, "sender", None)
         if sender is not None and getattr(sender, "id", None) is not None:
-            name = _display_name(sender)
+            name = utils.get_display_name(sender)
             if name:
                 self._names[sender.id] = name
         chat = getattr(event, "chat", None)
         chat_id = getattr(event, "chat_id", None)
         if chat is not None and chat_id is not None:
-            title = _display_name(chat)
+            title = utils.get_display_name(chat)
             if title:
                 self._titles[chat_id] = title
 
@@ -114,12 +86,10 @@ class MessageLogger:
         is_channel: bool,
         chat_title: str | None,
         *,
-        sender_id: int | None = None,
         overwrite: bool = True,
     ) -> None:
-        if sender_id is None:
-            from_id = getattr(message, "from_id", None)
-            sender_id = utils.get_peer_id(from_id) if from_id else None
+        from_id = getattr(message, "from_id", None)
+        sender_id = utils.get_peer_id(from_id) if from_id else None
         if sender_id is None:
             sender_id = getattr(message, "sender_id", None)
         media_path, media_type = await self.capture_media(message, peer_id)
@@ -206,7 +176,6 @@ class MessageLogger:
                 peer_id=peer_id,
                 is_channel=bool(event.is_channel),
                 chat_title=self.chat_title(peer_id),
-                sender_id=getattr(event, "sender_id", None),
             )
         except Exception:
             log.exception("on_new_message failed")

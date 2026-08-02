@@ -1,6 +1,7 @@
 import types
 
 import pytest
+from telethon.tl.types import Chat, User
 
 from config import Config
 from handlers import MessageLogger
@@ -85,10 +86,17 @@ def fake_event(
 ):
     import datetime
 
-    sender = types.SimpleNamespace(id=sender_id, first_name="Alice", last_name=None,
-                                   username="alice", title=None)
-    chat = types.SimpleNamespace(id=abs(chat_id), title="My Chat", first_name=None,
-                                 last_name=None, username=None)
+    sender = User(
+        id=sender_id, is_self=False, contact=False, mutual_contact=False,
+        deleted=False, bot=False, bot_chat_history=False, bot_nochats=False,
+        verified=False, restricted=False, min=False, bot_inline_geo=False,
+        support=False, scam=False, apply_min_photo=False, fake=False,
+        first_name="Alice", last_name=None, username="alice",
+    )
+    chat = Chat(
+        id=abs(chat_id), title="My Chat", photo=None,
+        participants_count=0, date=None, version=0,
+    )
     message = types.SimpleNamespace(
         id=msg_id,
         message=text,
@@ -97,6 +105,7 @@ def fake_event(
         file=file,
         date=datetime.datetime.fromtimestamp(date_ts, tz=datetime.timezone.utc),
         out=out,
+        sender_id=sender_id,
     )
     return types.SimpleNamespace(
         chat_id=chat_id,
