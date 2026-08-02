@@ -118,3 +118,49 @@ async def test_already_deleted_is_not_reported_twice(tmp_path):
     await logger.on_message_deleted(delete_event([5], chat_id=-1001))
     assert len(client.sent) == 1
     db.close()
+
+
+async def test_batch_continues_after_one_item_raises(tmp_path):
+    """The whole point of moving try/except inside the loop: one bad lookup
+    must not swallow the rest of the batch."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="one")
+    seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="two")
+
+    original_find = db.find_message
+
+    def flaky_find(chat_id, msg_id):
+        if msg_id == 1:
+            raise RuntimeError("boom")
+        return original_find(chat_id, msg_id)
+
+    db.find_message = flaky_find
+
+    await logger.on_message_deleted(delete_event([1, 2], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "two" in client.sent[0][1]
+    db.close()
+
+
+async def test_mixed_batch_trackable_and_ignored(tmp_path):
+    """DM/basic-group deletions carry no chat_id, so a single batch can mix
+    messages from a tracked chat and an ignored one — each must be filtered
+    independently after lookup."""
+    logger, client, db = make_logger(tmp_path, ignore={777, -2002})
+    seed(db, chat_id=-1001, msg_id=1, is_channel=False, text="keep")
+    seed(db, chat_id=-2002, msg_id=2, is_channel=False, text="ignored")
+    await logger.on_message_deleted(delete_event([1, 2], chat_id=None))
+    assert len(client.sent) == 1
+    assert "keep" in client.sent[0][1]
+    db.close()
+
+
+async def test_batch_with_missing_and_present(tmp_path):
+    """One id in the batch was never cached; the other was — the cached one
+    must still be reported."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="present")
+    await logger.on_message_deleted(delete_event([999, 1], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "present" in client.sent[0][1]
+    db.close()

@@ -216,11 +216,11 @@ class MessageLogger:
             log.exception("on_message_edited failed")
 
     async def on_message_deleted(self, event) -> None:
-        try:
-            chat_id = event.chat_id  # only channels and supergroups fill this in
-            if chat_id is not None and not self.is_tracked(chat_id):
-                return
-            for msg_id in event.deleted_ids:
+        chat_id = event.chat_id  # only channels and supergroups fill this in
+        if chat_id is not None and not self.is_tracked(chat_id):
+            return
+        for msg_id in event.deleted_ids:
+            try:
                 stored = self.storage.find_message(chat_id, msg_id)
                 if stored is None:
                     log.debug("deleted message %s not in cache", msg_id)
@@ -233,5 +233,5 @@ class MessageLogger:
                 await self.send_report(
                     reports.format_deleted(stored), media_path=stored.media_path
                 )
-        except Exception:
-            log.exception("on_message_deleted failed")
+            except Exception:
+                log.exception("on_message_deleted failed for msg_id %s", msg_id)
