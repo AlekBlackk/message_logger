@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from telethon import TelegramClient, utils
+from telethon.tl.types import Channel
 
 from config import Config, ConfigError, load_config
 from handlers import MessageLogger
@@ -79,6 +80,47 @@ async def retention_loop(cfg: Config, storage: Storage) -> None:
         await asyncio.sleep(RETENTION_INTERVAL_SEC)
 
 
+BACKFILL_PAUSE_SEC = 1
+
+
+async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[int]) -> int:
+    """Warm the cache with recent history for explicitly watched chats.
+
+    Runs only against an explicit WATCH_CHATS list — sweeping every dialog of an
+    account with hundreds of chats invites FloodWait with no upper bound.
+    Existing rows are never overwritten, so a deleted=1 flag survives a restart.
+    Sends no reports: this is cache filling, not an event.
+    """
+    if not cfg.backfill_on_start:
+        return 0
+    if not watch_ids:
+        log.info("backfill skipped: WATCH_CHATS is empty (watching all chats)")
+        return 0
+
+    total = 0
+    for peer_id in sorted(watch_ids):
+        cached = 0
+        try:
+            entity = await client.get_entity(peer_id)
+            is_channel = isinstance(entity, Channel)
+            async for message in client.iter_messages(peer_id, limit=cfg.backfill_limit):
+                await logger.store_message(
+                    message,
+                    peer_id=peer_id,
+                    is_channel=is_channel,
+                    chat_title=logger.chat_title(peer_id),
+                    overwrite=False,
+                )
+                cached += 1
+        except Exception:
+            log.exception("backfill failed for chat %s", peer_id)
+        total += cached
+        log.info("backfill: cached %s messages from %s", cached, peer_id)
+        await asyncio.sleep(BACKFILL_PAUSE_SEC)
+    log.info("backfill done: %s messages", total)
+    return total
+
+
 async def run(cfg: Config) -> None:
     storage = Storage(cfg.db_path)
     client = build_client(cfg)
@@ -107,6 +149,8 @@ async def run(cfg: Config) -> None:
             ignore_ids=ignore_ids,
         )
         logger.register()
+
+        await backfill(client, logger, cfg, watch_ids)
 
         stop = asyncio.Event()
 
