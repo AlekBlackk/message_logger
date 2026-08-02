@@ -157,8 +157,12 @@ class Storage:
             (cutoff_ts,),
         ).fetchall()
         paths = [r["media_path"] for r in rows]
+        self.conn.execute(
+            "DELETE FROM edits WHERE (chat_id, msg_id) IN "
+            "(SELECT chat_id, msg_id FROM messages WHERE date < ?)",
+            (cutoff_ts,),
+        )
         self.conn.execute("DELETE FROM messages WHERE date < ?", (cutoff_ts,))
-        self.conn.execute("DELETE FROM edits WHERE date < ?", (cutoff_ts,))
         self.conn.commit()
         return paths
 

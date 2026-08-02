@@ -122,6 +122,17 @@ def test_purge_older_than_removes_rows_and_returns_media(tmp_path):
     db.close()
 
 
+def test_purge_removes_edits_dated_after_their_message(tmp_path):
+    """Edit rows can be dated later than their message — purge must still catch them."""
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=100))
+    db.add_edit(-1001, 1, "before", "after", 250)
+    db.purge_older_than(200)
+    assert db.find_message(-1001, 1) is None
+    assert db.get_edits(-1001, 1) == []
+    db.close()
+
+
 def test_wal_mode_enabled(tmp_path):
     db = open_db(tmp_path)
     mode = db.conn.execute("PRAGMA journal_mode").fetchone()[0]
