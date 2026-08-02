@@ -1,1 +1,10 @@
 .superpowers/
+*.session
+*.session-journal
+*.db
+*.db-wal
+*.db-shm
+.env
+media/
+__pycache__/
+.pytest_cache/

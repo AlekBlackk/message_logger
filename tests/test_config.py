@@ -1,0 +1,102 @@
+import pytest
+
+from config import Config, ConfigError, load_config, parse_chat_list
+
+
+def test_parse_chat_list_empty():
+    assert parse_chat_list("") == ()
+    assert parse_chat_list("   ") == ()
+
+
+def test_parse_chat_list_strips_and_splits():
+    assert parse_chat_list(" @foo, -1001234 ,bar ") == ("@foo", "-1001234", "bar")
+
+
+def test_parse_chat_list_drops_empty_items():
+    assert parse_chat_list("@foo,,@bar,") == ("@foo", "@bar")
+
+
+def _write_env(tmp_path, body):
+    path = tmp_path / ".env"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_load_config_reads_values(tmp_path):
+    env = _write_env(
+        tmp_path,
+        "API_ID=123\n"
+        "API_HASH=abc\n"
+        "SESSION_NAME=sess\n"
+        "WATCH_CHATS=@a,@b\n"
+        "IGNORE_CHATS=\n"
+        "LOG_TARGET=me\n"
+        "LOG_OUTGOING=false\n"
+        "LOG_EDITS=true\n"
+        "DOWNLOAD_MEDIA=true\n"
+        "MAX_MEDIA_MB=10\n"
+        "MEDIA_DIR=media\n"
+        "DB_PATH=messages.db\n"
+        "RETENTION_DAYS=7\n"
+        "BACKFILL_ON_START=true\n"
+        "BACKFILL_LIMIT=50\n"
+        "PROXY_ENABLED=false\n",
+    )
+    cfg = load_config(env)
+    assert cfg.api_id == 123
+    assert cfg.api_hash == "abc"
+    assert cfg.session_name == "sess"
+    assert cfg.watch_chats == ("@a", "@b")
+    assert cfg.ignore_chats == ()
+    assert cfg.log_outgoing is False
+    assert cfg.log_edits is True
+    assert cfg.retention_days == 7
+    assert cfg.backfill_limit == 50
+
+
+def test_load_config_defaults(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\n")
+    cfg = load_config(env)
+    assert cfg.session_name == "logger"
+    assert cfg.log_target == "me"
+    assert cfg.max_media_mb == 50
+    assert cfg.retention_days == 14
+    assert cfg.backfill_limit == 200
+
+
+def test_max_media_bytes(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nMAX_MEDIA_MB=2\n")
+    assert load_config(env).max_media_bytes == 2 * 1024 * 1024
+
+
+def test_missing_api_id_raises(tmp_path):
+    env = _write_env(tmp_path, "API_HASH=h\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "API_ID" in str(exc.value)
+
+
+def test_non_numeric_api_id_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=nope\nAPI_HASH=h\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "API_ID" in str(exc.value)
+
+
+def test_proxy_dict_disabled(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nPROXY_ENABLED=false\n")
+    assert load_config(env).proxy_dict() is None
+
+
+def test_proxy_dict_enabled(tmp_path):
+    env = _write_env(
+        tmp_path,
+        "API_ID=1\nAPI_HASH=h\n"
+        "PROXY_ENABLED=true\nPROXY_TYPE=socks5\n"
+        "PROXY_HOST=1.2.3.4\nPROXY_PORT=1080\n",
+    )
+    assert load_config(env).proxy_dict() == {
+        "proxy_type": "socks5",
+        "addr": "1.2.3.4",
+        "port": 1080,
+    }
