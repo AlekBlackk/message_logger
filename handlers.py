@@ -181,7 +181,38 @@ class MessageLogger:
             log.exception("on_new_message failed")
 
     async def on_message_edited(self, event) -> None:
-        """Implemented in Task 5."""
+        try:
+            peer_id = event.chat_id
+            if peer_id is None or not self.is_tracked(peer_id):
+                return
+            if event.out and not self.config.log_outgoing:
+                return
+            self.remember_names(event)
+            new_text = event.message.message or None
+            previous = self.storage.find_message(peer_id, event.message.id)
+            if previous is None:
+                # Never saw the original (bot was offline) — just start caching it
+                await self.store_message(
+                    event.message,
+                    peer_id=peer_id,
+                    is_channel=bool(event.is_channel),
+                    chat_title=self.chat_title(peer_id),
+                )
+                return
+            if previous.text == new_text:
+                # Reactions and link-preview attachments also fire MessageEdited
+                return
+            edited_at = int(event.message.date.timestamp())
+            self.storage.add_edit(
+                peer_id, event.message.id, previous.text, new_text, edited_at
+            )
+            self.storage.update_text(peer_id, event.message.id, new_text)
+            if self.config.log_edits:
+                await self.send_report(
+                    reports.format_edited(previous, previous.text, new_text)
+                )
+        except Exception:
+            log.exception("on_message_edited failed")
 
     async def on_message_deleted(self, event) -> None:
         """Implemented in Task 6."""
