@@ -86,3 +86,16 @@ async def test_edit_with_identical_text_is_ignored(tmp_path):
     assert client.sent == []
     assert db.get_edits(-1001, 5) == []
     db.close()
+
+
+async def test_edit_records_edit_date_not_send_date(tmp_path):
+    """Telegram's Message.date is the original send time and never changes on
+    edit — the edit timestamp lives in the separate edit_date field."""
+    logger, _client, db = make_logger(tmp_path)
+    seed(db, text="old")
+    await logger.on_message_edited(
+        fake_event(text="new", date_ts=1700000000, edit_date_ts=1700005000)
+    )
+    edits = db.get_edits(-1001, 5)
+    assert edits == [("old", "new", 1700005000)]
+    db.close()

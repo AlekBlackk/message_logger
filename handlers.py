@@ -202,7 +202,8 @@ class MessageLogger:
             if previous.text == new_text:
                 # Reactions and link-preview attachments also fire MessageEdited
                 return
-            edited_at = int(event.message.date.timestamp())
+            edit_date = getattr(event.message, "edit_date", None)
+            edited_at = int((edit_date or event.message.date).timestamp())
             self.storage.add_edit(
                 peer_id, event.message.id, previous.text, new_text, edited_at
             )

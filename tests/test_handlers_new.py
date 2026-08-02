@@ -83,6 +83,7 @@ def fake_event(
     media=None,
     file=None,
     date_ts=1700000000,
+    edit_date_ts=None,
 ):
     import datetime
 
@@ -106,6 +107,11 @@ def fake_event(
         date=datetime.datetime.fromtimestamp(date_ts, tz=datetime.timezone.utc),
         out=out,
         sender_id=sender_id,
+        edit_date=(
+            datetime.datetime.fromtimestamp(edit_date_ts, tz=datetime.timezone.utc)
+            if edit_date_ts is not None
+            else None
+        ),
     )
     return types.SimpleNamespace(
         chat_id=chat_id,
