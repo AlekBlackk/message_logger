@@ -7,7 +7,7 @@ Personal account, personal use. Requires MTProto — the Bot API has no deletion
 
 ## Setup
 
-Requires Python 3.11+.
+Requires Python 3.10+.
 
 1. `pip install -r requirements.txt`
 2. `cp .env.example .env` and fill `API_ID` / `API_HASH` from https://my.telegram.org
