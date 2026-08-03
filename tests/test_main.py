@@ -163,6 +163,57 @@ async def test_run_account_closes_storage_when_build_client_fails(tmp_path, monk
     assert any("crashed" in r.message for r in caplog.records)
 
 
+async def test_run_account_logs_when_storage_construction_fails(tmp_path, monkeypatch, caplog):
+    """If Storage() itself raises, there is nothing to close yet — but the
+    failure must still be logged rather than escaping run_account uncaught,
+    since run_all() (a later task) discards asyncio.gather()'s return list."""
+    cfg = make_config(tmp_path)
+
+    class FailingStorage:
+        def __init__(self, _db_path):
+            raise RuntimeError("disk full")
+
+    monkeypatch.setattr(main, "Storage", FailingStorage)
+
+    with caplog.at_level(logging.ERROR):
+        await main.run_account("acc1", cfg, asyncio.Event())
+
+    assert any("acc1" in r.message and "crashed" in r.message for r in caplog.records)
+
+
+async def test_run_account_logs_when_cleanup_disconnect_fails(tmp_path, monkeypatch, caplog):
+    """A failure inside the finally block's cleanup (client.disconnect() here)
+    must be logged and swallowed, not propagated — and must not prevent the
+    remaining cleanup steps (storage.close()) from still being attempted."""
+    cfg = make_config(tmp_path)
+    client = FakeRunClient({"me": entity(777)})
+
+    async def failing_disconnect():
+        client.disconnect_calls += 1
+        raise RuntimeError("network gone")
+
+    client.disconnect = failing_disconnect
+    monkeypatch.setattr(main, "build_client", lambda _cfg: client)
+    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
+    monkeypatch.setattr(main.utils, "get_display_name", lambda e: "me")
+
+    closed = []
+    real_close = main.Storage.close
+
+    def tracking_close(self):
+        closed.append(True)
+        real_close(self)
+
+    monkeypatch.setattr(main.Storage, "close", tracking_close)
+
+    with caplog.at_level(logging.ERROR):
+        await main.run_account("acc1", cfg, asyncio.Event())
+
+    assert client.disconnect_calls == 1
+    assert closed, "storage.close() must still run even though disconnect() raised"
+    assert any("acc1" in r.message for r in caplog.records)
+
+
 async def test_run_account_calls_backfill_after_register(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=5,
                        watch_chats=("@a",))

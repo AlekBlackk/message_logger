@@ -158,7 +158,13 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
     logged and swallowed here so one account's failure can't cancel its
     siblings under the asyncio.gather() in run_all()."""
     acc_log = logging.getLogger(f"message_log.{label}")
-    storage = Storage(cfg.db_path)
+    try:
+        storage = Storage(cfg.db_path)
+    except Exception:
+        # Nothing exists yet to close — log and bail rather than let this
+        # escape run_all()'s asyncio.gather(), whose return list is unread.
+        acc_log.exception("account %s crashed", label)
+        return
     client = None
     retention_task: asyncio.Task | None = None
     try:
@@ -211,15 +217,26 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
     except Exception:
         acc_log.exception("account %s crashed", label)
     finally:
+        # Each cleanup step is guarded independently so a failure in one
+        # (e.g. a hung disconnect) can't skip the ones after it — and none of
+        # them may let an exception escape run_account itself.
         if retention_task is not None:
             retention_task.cancel()
             try:
                 await retention_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                acc_log.exception("account %s: retention task cleanup crashed", label)
         if client is not None:
-            await client.disconnect()
-        storage.close()
+            try:
+                await client.disconnect()
+            except Exception:
+                acc_log.exception("account %s: client disconnect crashed", label)
+        try:
+            storage.close()
+        except Exception:
+            acc_log.exception("account %s: storage close crashed", label)
         acc_log.info("stopped cleanly")
 
 
