@@ -12,6 +12,7 @@ from pathlib import Path
 from telethon import TelegramClient, utils
 from telethon.tl.types import Channel
 
+from commands import CommandHandler
 from config import Config, ConfigError, load_config
 from handlers import MessageLogger
 from storage import Storage
@@ -181,6 +182,16 @@ async def run(cfg: Config) -> None:
             ignore_ids=ignore_ids,
         )
         logger.register()
+
+        commands_handler = CommandHandler(
+            client=client,
+            storage=storage,
+            logger=logger,
+            config=cfg,
+            log_target_id=log_target_id,
+            backfill_fn=backfill_one_chat,
+        )
+        commands_handler.register()
 
         await backfill(client, logger, cfg, watch_ids)
 
