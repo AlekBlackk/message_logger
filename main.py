@@ -13,7 +13,7 @@ from telethon import TelegramClient, utils
 from telethon.tl.types import Channel
 
 from commands import CommandHandler
-from config import Config, ConfigError, load_config
+from config import Config, ConfigError, load_account_configs
 from handlers import MessageLogger
 from storage import Storage
 
@@ -240,14 +240,33 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
         acc_log.info("stopped cleanly")
 
 
+async def run_all(accounts: list[tuple[str, Config]]) -> None:
+    stop = asyncio.Event()
+
+    def request_stop(*_args) -> None:
+        log.info("shutdown requested")
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, request_stop)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    await asyncio.gather(
+        *(run_account(label, cfg, stop) for label, cfg in accounts),
+        return_exceptions=True,
+    )
+
+
 def main() -> None:
     setup_logging()
     try:
-        cfg = load_config()
+        accounts = load_account_configs()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(1)
-    asyncio.run(run_account(cfg.session_name, cfg, asyncio.Event()))
+    asyncio.run(run_all(accounts))
 
 
 if __name__ == "__main__":

@@ -282,3 +282,36 @@ async def test_load_watch_ids_empty_when_no_env_list_and_empty_db(tmp_path):
     ids = await main.load_watch_ids(client, db, cfg)
     assert ids == set()
     db.close()
+
+
+async def test_run_all_isolates_account_failures(tmp_path, monkeypatch, caplog):
+    """One account crashing must not stop asyncio.gather() from completing the
+    others — this is the reason run_account() catches instead of raising."""
+    ok_cfg = make_config(tmp_path, session_name="ok")
+    bad_cfg = make_config(tmp_path, session_name="bad", db_path=tmp_path / "bad.db")
+
+    ok_client = FakeRunClient({"me": entity(1)})
+    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
+    monkeypatch.setattr(main.utils, "get_display_name", lambda e: "me")
+
+    def build_client_for(cfg):
+        if cfg.session_name == "bad":
+            raise RuntimeError("boom")
+        return ok_client
+
+    monkeypatch.setattr(main, "build_client", build_client_for)
+
+    class RecordingLogger:
+        def __init__(self, **_kw):
+            pass
+
+        def register(self):
+            pass
+
+    monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
+
+    with caplog.at_level(logging.ERROR):
+        await main.run_all([("ok", ok_cfg), ("bad", bad_cfg)])
+
+    assert ok_client.disconnect_calls == 1
+    assert any("bad" in r.message and "crashed" in r.message for r in caplog.records)
