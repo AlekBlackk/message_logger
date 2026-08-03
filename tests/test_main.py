@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import types
 
 import pytest
@@ -83,8 +84,8 @@ class FakeRunClient:
         self.disconnect_calls += 1
 
 
-async def test_run_wires_log_target_into_ignore_set(tmp_path, monkeypatch):
-    """run() must force the log target into ignore_ids — the feedback-loop guard."""
+async def test_run_account_wires_log_target_into_ignore_set(tmp_path, monkeypatch):
+    """run_account() must force the log target into ignore_ids — the feedback-loop guard."""
     cfg = make_config(tmp_path, log_target="me", ignore_chats=("@x",))
     client = FakeRunClient({"me": entity(777), "@x": entity(5)})
     monkeypatch.setattr(main, "build_client", lambda _cfg: client)
@@ -102,7 +103,7 @@ async def test_run_wires_log_target_into_ignore_set(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
 
-    await main.run(cfg)
+    await main.run_account("test", cfg, asyncio.Event())
 
     assert captured["log_target_id"] == 777
     assert 777 in captured["ignore_ids"]
@@ -111,8 +112,10 @@ async def test_run_wires_log_target_into_ignore_set(tmp_path, monkeypatch):
     assert client.disconnect_calls == 1
 
 
-async def test_run_closes_storage_when_startup_fails(tmp_path, monkeypatch):
-    """A failure after Storage() is constructed must still release the handle."""
+async def test_run_account_closes_storage_when_startup_fails(tmp_path, monkeypatch, caplog):
+    """A failure after Storage() is constructed must still release the handle,
+    and must be logged rather than propagated — one account's crash can't be
+    allowed to cancel its siblings under asyncio.gather()."""
     cfg = make_config(tmp_path)
     client = FakeRunClient({}, start_error=RuntimeError("no network"))
     monkeypatch.setattr(main, "build_client", lambda _cfg: client)
@@ -126,16 +129,17 @@ async def test_run_closes_storage_when_startup_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main.Storage, "close", tracking_close)
 
-    with pytest.raises(RuntimeError, match="no network"):
-        await main.run(cfg)
+    with caplog.at_level(logging.ERROR):
+        await main.run_account("acc1", cfg, asyncio.Event())
 
     assert closed, "storage.close() must run even when startup fails"
     assert client.disconnect_calls == 1
+    assert any("acc1" in r.message and "crashed" in r.message for r in caplog.records)
 
 
-async def test_run_closes_storage_when_build_client_fails(tmp_path, monkeypatch):
+async def test_run_account_closes_storage_when_build_client_fails(tmp_path, monkeypatch, caplog):
     """storage must not leak even if build_client() itself raises, before any
-    client exists to disconnect."""
+    client exists to disconnect. The exception is logged, not propagated."""
     cfg = make_config(tmp_path)
 
     def failing_build_client(_cfg):
@@ -152,13 +156,14 @@ async def test_run_closes_storage_when_build_client_fails(tmp_path, monkeypatch)
 
     monkeypatch.setattr(main.Storage, "close", tracking_close)
 
-    with pytest.raises(RuntimeError, match="bad session file"):
-        await main.run(cfg)
+    with caplog.at_level(logging.ERROR):
+        await main.run_account("acc1", cfg, asyncio.Event())
 
     assert closed, "storage.close() must run even when build_client() fails"
+    assert any("crashed" in r.message for r in caplog.records)
 
 
-async def test_run_calls_backfill_after_register(tmp_path, monkeypatch):
+async def test_run_account_calls_backfill_after_register(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=5,
                        watch_chats=("@a",))
     client = FakeRunClient({"me": entity(777), "@a": entity(-1001)})
@@ -189,7 +194,7 @@ async def test_run_calls_backfill_after_register(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "backfill", fake_backfill)
 
-    await main.run(cfg)
+    await main.run_account("test", cfg, asyncio.Event())
 
     assert call_order == ["register", "backfill"]
 

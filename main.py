@@ -153,20 +153,24 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
     return total
 
 
-async def run(cfg: Config) -> None:
+async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
+    """Runs one account end-to-end. Never raises: an unhandled exception is
+    logged and swallowed here so one account's failure can't cancel its
+    siblings under the asyncio.gather() in run_all()."""
+    acc_log = logging.getLogger(f"message_log.{label}")
     storage = Storage(cfg.db_path)
     client = None
     retention_task: asyncio.Task | None = None
     try:
         client = build_client(cfg)
         await client.start()
-        log.info("connected as %s", utils.get_display_name(await client.get_me()))
+        acc_log.info("connected as %s", utils.get_display_name(await client.get_me()))
 
         log_target_id = utils.get_peer_id(await client.get_entity(cfg.log_target))
         watch_ids = await load_watch_ids(client, storage, cfg)
         ignore_ids = await resolve_peer_ids(client, cfg.ignore_chats)
         ignore_ids.add(log_target_id)  # never cache our own reports
-        log.info(
+        acc_log.info(
             "log target %s, watching %s chats, ignoring %s chats",
             log_target_id,
             len(watch_ids) or "all",
@@ -180,6 +184,7 @@ async def run(cfg: Config) -> None:
             log_target_id=log_target_id,
             watch_ids=watch_ids,
             ignore_ids=ignore_ids,
+            log=acc_log,
         )
         logger.register()
 
@@ -195,18 +200,6 @@ async def run(cfg: Config) -> None:
 
         await backfill(client, logger, cfg, watch_ids)
 
-        stop = asyncio.Event()
-
-        def request_stop(*_args) -> None:
-            log.info("shutdown requested")
-            stop.set()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(sig, request_stop)
-            except (ValueError, OSError, AttributeError):
-                pass
-
         retention_task = asyncio.create_task(retention_loop(cfg, storage))
         # Poll rather than awaiting a single future: on Windows the loop must
         # wake up regularly for a Ctrl+C signal handler to run at all.
@@ -215,6 +208,8 @@ async def run(cfg: Config) -> None:
         # network drop no longer shuts the bot down.
         while not stop.is_set() and not client.disconnected.done():
             await asyncio.sleep(1)
+    except Exception:
+        acc_log.exception("account %s crashed", label)
     finally:
         if retention_task is not None:
             retention_task.cancel()
@@ -225,7 +220,7 @@ async def run(cfg: Config) -> None:
         if client is not None:
             await client.disconnect()
         storage.close()
-        log.info("stopped cleanly")
+        acc_log.info("stopped cleanly")
 
 
 def main() -> None:
@@ -235,7 +230,7 @@ def main() -> None:
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(1)
-    asyncio.run(run(cfg))
+    asyncio.run(run_account(cfg.session_name, cfg, asyncio.Event()))
 
 
 if __name__ == "__main__":
