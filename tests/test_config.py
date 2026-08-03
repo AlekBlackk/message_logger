@@ -100,3 +100,59 @@ def test_proxy_dict_enabled(tmp_path):
         "addr": "1.2.3.4",
         "port": 1080,
     }
+
+
+def test_api_id_zero_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=0\nAPI_HASH=h\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "API_ID" in str(exc.value)
+
+
+def test_api_id_negative_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=-1\nAPI_HASH=h\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "API_ID" in str(exc.value)
+
+
+def test_max_media_mb_negative_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nMAX_MEDIA_MB=-1\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "MAX_MEDIA_MB" in str(exc.value)
+
+
+def test_retention_days_zero_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nRETENTION_DAYS=0\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "RETENTION_DAYS" in str(exc.value)
+
+
+def test_backfill_limit_negative_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nBACKFILL_LIMIT=-1\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "BACKFILL_LIMIT" in str(exc.value)
+
+
+def test_proxy_port_zero_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nPROXY_PORT=0\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "PROXY_PORT" in str(exc.value)
+
+
+def test_proxy_port_too_large_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nPROXY_PORT=70000\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "PROXY_PORT" in str(exc.value)
+
+
+def test_log_edits_typo_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_EDITS=ture\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "LOG_EDITS" in str(exc.value)

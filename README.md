@@ -7,6 +7,8 @@ Personal account, personal use. Requires MTProto — the Bot API has no deletion
 
 ## Setup
 
+Requires Python 3.11+.
+
 1. `pip install -r requirements.txt`
 2. `cp .env.example .env` and fill `API_ID` / `API_HASH` from https://my.telegram.org
 3. `python main.py` — Telethon asks for your phone, the login code and, if enabled,
@@ -28,6 +30,9 @@ Personal account, personal use. Requires MTProto — the Bot API has no deletion
 | `BACKFILL_ON_START`, `BACKFILL_LIMIT` | Warm the cache at startup. Needs a non-empty `WATCH_CHATS`. |
 | `PROXY_ENABLED`, `PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT` | SOCKS/HTTP proxy. |
 
+Values in `.env` take precedence over any same-named variable already set in your
+shell environment.
+
 ## How it works
 
 Every incoming message is written to SQLite along with its media, because after a
@@ -40,6 +45,11 @@ supergroups — so the cache is what makes a useful report possible at all.
 - If the bot is offline when a message is deleted, no report is produced. The cached
   copy stays, but the event is gone.
 - Backfill only runs for an explicit `WATCH_CHATS` list.
+- `RETENTION_DAYS` also deletes the cached media files for purged rows, not just the
+  database rows.
+- Message edit history is recorded in the database (`edits` table) but not currently
+  surfaced in deletion/edit reports — `format_deleted` only shows the most recent
+  text. This is intentional groundwork for a future history command, not a bug.
 
 ## Security
 

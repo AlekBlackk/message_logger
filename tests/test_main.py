@@ -52,17 +52,6 @@ async def test_resolve_skips_unresolvable(monkeypatch, caplog):
     assert got == {111}
 
 
-async def test_log_target_is_added_to_ignore(tmp_path, monkeypatch):
-    """Point 4 of the spec: reports must never be cached back."""
-    cfg = make_config(tmp_path, ignore_chats=("@x",))
-    client = ResolvingClient({"@x": entity(5), "me": entity(777)})
-    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
-    ignore = await main.resolve_peer_ids(client, cfg.ignore_chats)
-    target = main.utils.get_peer_id(await client.get_entity(cfg.log_target))
-    ignore.add(target)
-    assert ignore == {5, 777}
-
-
 class FakeRunClient:
     """Minimal stand-in for TelegramClient's run() surface."""
 
@@ -142,3 +131,64 @@ async def test_run_closes_storage_when_startup_fails(tmp_path, monkeypatch):
 
     assert closed, "storage.close() must run even when startup fails"
     assert client.disconnect_calls == 1
+
+
+async def test_run_closes_storage_when_build_client_fails(tmp_path, monkeypatch):
+    """storage must not leak even if build_client() itself raises, before any
+    client exists to disconnect."""
+    cfg = make_config(tmp_path)
+
+    def failing_build_client(_cfg):
+        raise RuntimeError("bad session file")
+
+    monkeypatch.setattr(main, "build_client", failing_build_client)
+
+    closed = []
+    real_close = main.Storage.close
+
+    def tracking_close(self):
+        closed.append(True)
+        real_close(self)
+
+    monkeypatch.setattr(main.Storage, "close", tracking_close)
+
+    with pytest.raises(RuntimeError, match="bad session file"):
+        await main.run(cfg)
+
+    assert closed, "storage.close() must run even when build_client() fails"
+
+
+async def test_run_calls_backfill_after_register(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=5,
+                       watch_chats=("@a",))
+    client = FakeRunClient({"me": entity(777), "@a": entity(-1001)})
+    monkeypatch.setattr(main, "build_client", lambda _cfg: client)
+    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
+    monkeypatch.setattr(main.utils, "get_display_name", lambda e: "name")
+
+    call_order = []
+
+    class RecordingLogger:
+        def __init__(self, **_kw):
+            pass
+
+        def register(self):
+            call_order.append("register")
+
+        def chat_title(self, _peer_id):
+            return None
+
+        def seed_chat_title(self, _peer_id, _title):
+            pass
+
+    monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
+
+    async def fake_backfill(_client, _logger, _cfg, _watch_ids):
+        call_order.append("backfill")
+        return 0
+
+    monkeypatch.setattr(main, "backfill", fake_backfill)
+
+    await main.run(cfg)
+
+    assert call_order == ["register", "backfill"]

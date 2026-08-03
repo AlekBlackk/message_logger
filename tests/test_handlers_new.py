@@ -242,3 +242,49 @@ async def test_send_report_falls_back_when_media_missing(tmp_path):
     assert client.files == []
     assert len(client.sent) == 1
     db.close()
+
+
+async def test_sender_name_cached_for_channel_sender(tmp_path):
+    """A post from a channel/anon-admin has sender=Channel, whose marked peer id
+    differs from its raw id — the name cache must key on the marked id, matching
+    how store_message looks names up."""
+    from telethon.tl.types import Channel
+
+    logger, _client, db = make_logger(tmp_path)
+    channel_sender = Channel(id=555, title="Some Channel", photo=None, date=None)
+    event = fake_event(sender_id=None)
+    event.sender = channel_sender
+    event.message.sender_id = -1000000000555  # utils.get_peer_id(channel_sender)
+    event.sender_id = -1000000000555
+
+    await logger.on_new_message(event)
+    stored = db.find_message(-1001, 5)
+    assert stored.sender_name == "Some Channel"
+    db.close()
+
+
+async def test_send_report_falls_back_to_text_when_caption_too_long(tmp_path):
+    from telethon.errors import MediaCaptionTooLongError
+
+    path = tmp_path / "f.jpg"
+    path.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+
+    async def failing_send_file(_target, _file, **_kw):
+        raise MediaCaptionTooLongError(request=None)
+
+    client.send_file = failing_send_file
+    await logger.send_report("a" * 1200, media_path=str(path))
+    assert len(client.sent) == 1
+    assert client.sent[0][1] == "a" * 1200
+    db.close()
+
+
+async def test_media_with_unsafe_extension_falls_back_to_bin(tmp_path):
+    file = types.SimpleNamespace(size=10, ext="/../../evil", mime_type="application/octet-stream")
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_new_message(fake_event(media=object(), file=file))
+    stored = db.find_message(-1001, 5)
+    assert stored.media_path is not None
+    assert stored.media_path.endswith(".bin")
+    db.close()

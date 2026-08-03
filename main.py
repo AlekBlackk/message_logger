@@ -81,6 +81,7 @@ async def retention_loop(cfg: Config, storage: Storage) -> None:
 
 
 BACKFILL_PAUSE_SEC = 1
+BACKFILL_MEDIA_PAUSE_SEC = 0.5
 
 
 async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[int]) -> int:
@@ -103,15 +104,19 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
         try:
             entity = await client.get_entity(peer_id)
             is_channel = isinstance(entity, Channel)
+            chat_title = utils.get_display_name(entity) or logger.chat_title(peer_id)
+            logger.seed_chat_title(peer_id, chat_title)
             async for message in client.iter_messages(peer_id, limit=cfg.backfill_limit):
                 await logger.store_message(
                     message,
                     peer_id=peer_id,
                     is_channel=is_channel,
-                    chat_title=logger.chat_title(peer_id),
+                    chat_title=chat_title,
                     overwrite=False,
                 )
                 cached += 1
+                if message.media is not None:
+                    await asyncio.sleep(BACKFILL_MEDIA_PAUSE_SEC)
         except Exception:
             log.exception("backfill failed for chat %s", peer_id)
         total += cached
@@ -123,9 +128,10 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
 
 async def run(cfg: Config) -> None:
     storage = Storage(cfg.db_path)
-    client = build_client(cfg)
+    client = None
     retention_task: asyncio.Task | None = None
     try:
+        client = build_client(cfg)
         await client.start()
         log.info("connected as %s", utils.get_display_name(await client.get_me()))
 
@@ -179,7 +185,8 @@ async def run(cfg: Config) -> None:
                 await retention_task
             except asyncio.CancelledError:
                 pass
-        await client.disconnect()
+        if client is not None:
+            await client.disconnect()
         storage.close()
         log.info("stopped cleanly")
 

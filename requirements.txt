@@ -1,4 +1,4 @@
 telethon>=1.36,<2
 python-socks[asyncio]>=2.4
 python-dotenv>=1.0
-cryptg>=0.4
+# cryptg>=0.4  # optional: faster crypto, needs a C build toolchain — pip install cryptg

@@ -10,13 +10,13 @@ from tests.test_handlers_new import make_config, make_logger
 pytestmark = pytest.mark.asyncio
 
 
-def fake_message(msg_id, text="old text", sender_id=42):
+def fake_message(msg_id, text="old text", sender_id=42, media=None, file=None):
     return types.SimpleNamespace(
         id=msg_id,
         message=text,
         text=text,
-        media=None,
-        file=None,
+        media=media,
+        file=file,
         from_id=None,
         sender_id=sender_id,
         date=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
@@ -137,6 +137,55 @@ async def test_backfill_derives_is_channel_from_entity_type_not_id_shape(tmp_pat
     stored = db.find_message(None, 1)
     assert stored is not None
     assert stored.is_channel is False
+    db.close()
+
+
+async def test_backfill_populates_chat_title_from_entity(tmp_path, monkeypatch):
+    """entity is already fetched for is_channel — its display name must be used
+    for chat_title too, instead of the (empty at startup) in-memory titles cache.
+
+    NOTE: HistoryClient's bare SimpleNamespace fallback (`title="t"` but not a
+    real Chat/Channel/User) does not work here — telethon.utils.get_display_name
+    dispatches on isinstance(entity, (Chat, Channel, ...)), not duck-typing on a
+    `.title` attribute, so a SimpleNamespace always yields ''. A real Chat entity
+    is supplied instead, matching the pattern already used by
+    test_backfill_derives_is_channel_from_entity_type_not_id_shape below.
+    """
+    monkeypatch.setattr(main.asyncio, "sleep", _no_sleep)
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
+                      watch_chats=("@a",))
+    client = HistoryClient(
+        {-1001: [fake_message(1)]},
+        entities={-1001: Chat(id=1001, title="t", photo=None,
+                               participants_count=0, date=None, version=0)},
+    )
+    await main.backfill(client, logger, cfg, {-1001})
+    stored = db.find_message(-1001, 1)
+    assert stored.chat_title == "t"
+    db.close()
+
+
+async def test_backfill_pauses_after_media_messages(tmp_path, monkeypatch):
+    sleep_calls = []
+
+    async def recording_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(main.asyncio, "sleep", recording_sleep)
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
+                      watch_chats=("@a",), max_media_mb=1)
+    media_file = types.SimpleNamespace(size=10, ext=".jpg", mime_type="image/jpeg")
+    client = HistoryClient({
+        -1001: [
+            fake_message(1, media=object(), file=media_file),
+            fake_message(2),  # text-only, no media
+        ]
+    })
+    await main.backfill(client, logger, cfg, {-1001})
+    # One media-message pause + one between-chat pause = two sleep calls total
+    assert sleep_calls.count(main.BACKFILL_MEDIA_PAUSE_SEC) == 1
     db.close()
 
 

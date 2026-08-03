@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 
 from telethon import events, utils
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, MediaCaptionTooLongError
 
 import reports
 from config import Config
 from storage import Storage, StoredMessage
 
 log = logging.getLogger(__name__)
+
+_SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
 
 
 class MessageLogger:
@@ -61,7 +64,7 @@ class MessageLogger:
         if sender is not None and getattr(sender, "id", None) is not None:
             name = utils.get_display_name(sender)
             if name:
-                self._names[sender.id] = name
+                self._names[utils.get_peer_id(sender)] = name
         chat = getattr(event, "chat", None)
         chat_id = getattr(event, "chat_id", None)
         if chat is not None and chat_id is not None:
@@ -76,6 +79,11 @@ class MessageLogger:
 
     def chat_title(self, chat_id: int) -> str | None:
         return self._titles.get(chat_id)
+
+    def seed_chat_title(self, peer_id: int, title: str | None) -> None:
+        """Prime the title cache from a source other than a live event (e.g. backfill)."""
+        if title:
+            self._titles[peer_id] = title
 
     # --- storing ----------------------------------------------------------
 
@@ -121,6 +129,8 @@ class MessageLogger:
             log.info("media %s bytes over limit, skipping download", size)
             return None, media_type
         ext = getattr(file, "ext", None) or ".bin"
+        if not _SAFE_EXT_RE.match(ext):
+            ext = ".bin"
         target_dir = Path(self.config.media_dir) / str(peer_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{message.id}{ext}"
@@ -137,12 +147,23 @@ class MessageLogger:
         for attempt in (1, 2):
             try:
                 if media_path and os.path.exists(media_path):
-                    await self.client.send_file(
-                        self.log_target_id,
-                        media_path,
-                        caption=text,
-                        parse_mode="html",
-                    )
+                    try:
+                        await self.client.send_file(
+                            self.log_target_id,
+                            media_path,
+                            caption=text,
+                            parse_mode="html",
+                        )
+                    except MediaCaptionTooLongError:
+                        log.warning(
+                            "caption too long for media, sending report as text-only"
+                        )
+                        await self.client.send_message(
+                            self.log_target_id,
+                            text,
+                            parse_mode="html",
+                            link_preview=False,
+                        )
                 else:
                     await self.client.send_message(
                         self.log_target_id,
