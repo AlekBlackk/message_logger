@@ -27,7 +27,8 @@ _LIST_CHUNK_LIMIT = reports.MAX_TEXT_LEN
 _PURGE_USAGE = (
     "<b>/purge</b> — очистка сообщений из БД.\n"
     "/purge <дни> — по возрасту, все чаты (dry-run)\n"
-    "/purge <@chat|id> — вся история чата (dry-run)\n"
+    "/purge <@chat|id> — вся история чата (dry-run). Отрицательный id "
+    "(группы/каналы) распознаётся напрямую; для личных чатов используй @username\n"
     "/purge <@chat|id> <дни> — чат + возраст (dry-run)\n"
     "Добавь confirm в конец, чтобы реально удалить."
 )
@@ -157,7 +158,7 @@ class CommandHandler:
         chat_ref: str | None = None
         days: int | None = None
         if len(tokens) == 1:
-            if _is_int(tokens[0]):
+            if _is_int(tokens[0]) and int(tokens[0]) >= 0:
                 days = int(tokens[0])
             else:
                 chat_ref = tokens[0]

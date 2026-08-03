@@ -329,3 +329,15 @@ async def test_purge_resolve_failure_replies_with_error_and_does_not_touch_db(tm
     assert db.find_message(-1001, 1) is not None
     assert "⚠️" in client.sent[-1][1]
     db.close()
+
+
+async def test_purge_by_negative_numeric_id_resolves_as_chat(tmp_path):
+    handler, client, db, _calls = make_handler(
+        tmp_path, entities={-1001: chat_entity(1001, "Chat A")}
+    )
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge -1001 confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1002, 1) is not None
+    db.close()
