@@ -19,8 +19,6 @@ import reports
 from config import Config
 from storage import Storage, StoredMessage
 
-log = logging.getLogger(__name__)
-
 _SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
 
 
@@ -33,6 +31,7 @@ class MessageLogger:
         log_target_id: int,
         watch_ids: set[int],
         ignore_ids: set[int],
+        log: logging.Logger | None = None,
     ) -> None:
         self.client = client
         self.storage = storage
@@ -40,6 +39,7 @@ class MessageLogger:
         self.log_target_id = log_target_id
         self.watch_ids = watch_ids
         self.ignore_ids = ignore_ids
+        self.log = log or logging.getLogger(__name__)
         # get_entity per message triggers FloodWait — keep names in memory instead
         self._names: dict[int, str] = {}
         self._titles: dict[int, str] = {}
@@ -176,7 +176,7 @@ class MessageLogger:
             return None, media_type
         size = getattr(file, "size", None) or 0
         if size > self.config.max_media_bytes:
-            log.info("media %s bytes over limit, skipping download", size)
+            self.log.info("media %s bytes over limit, skipping download", size)
             return None, media_type
         ext = getattr(file, "ext", None) or ".bin"
         if not _SAFE_EXT_RE.match(ext):
@@ -187,7 +187,7 @@ class MessageLogger:
         try:
             await self.client.download_media(message, file=str(target))
         except Exception:
-            log.exception("failed to download media for message %s", message.id)
+            self.log.exception("failed to download media for message %s", message.id)
             return None, media_type
         return str(target), media_type
 
@@ -205,7 +205,7 @@ class MessageLogger:
                             parse_mode="html",
                         )
                     except MediaCaptionTooLongError:
-                        log.warning(
+                        self.log.warning(
                             "caption too long for media, sending report as text-only"
                         )
                         await self.client.send_message(
@@ -215,7 +215,7 @@ class MessageLogger:
                             link_preview=False,
                         )
                     except PhotoInvalidDimensionsError:
-                        log.warning(
+                        self.log.warning(
                             "photo dimensions rejected, resending %s as a document",
                             media_path,
                         )
@@ -236,12 +236,12 @@ class MessageLogger:
                 return True
             except FloodWaitError as exc:
                 if attempt == 2:
-                    log.error("flood wait again (%ss), dropping report", exc.seconds)
+                    self.log.error("flood wait again (%ss), dropping report", exc.seconds)
                     return False
-                log.warning("flood wait %ss, retrying report", exc.seconds)
+                self.log.warning("flood wait %ss, retrying report", exc.seconds)
                 await asyncio.sleep(exc.seconds + 1)
             except Exception:
-                log.exception("failed to send report")
+                self.log.exception("failed to send report")
                 return False
         return False
 
@@ -262,7 +262,7 @@ class MessageLogger:
                 chat_title=self.chat_title(peer_id),
             )
         except Exception:
-            log.exception("on_new_message failed")
+            self.log.exception("on_new_message failed")
 
     async def on_message_edited(self, event) -> None:
         try:
@@ -303,7 +303,7 @@ class MessageLogger:
                     )
                 )
         except Exception:
-            log.exception("on_message_edited failed")
+            self.log.exception("on_message_edited failed")
 
     async def on_message_deleted(self, event) -> None:
         chat_id = event.chat_id  # only channels and supergroups fill this in
@@ -313,7 +313,7 @@ class MessageLogger:
             try:
                 stored = self.storage.find_message(chat_id, msg_id)
                 if stored is None:
-                    log.debug("deleted message %s not in cache", msg_id)
+                    self.log.debug("deleted message %s not in cache", msg_id)
                     continue
                 if stored.deleted:
                     continue  # duplicate update for the same deletion
@@ -332,18 +332,18 @@ class MessageLogger:
                     f"[{stored.media_type}]" if stored.media_type else ""
                 )
                 if sent:
-                    log.info(
+                    self.log.info(
                         "deletion reported: chat [%s] msg %s: %r",
                         self.chat_label(stored.chat_id),
                         stored.msg_id,
                         preview,
                     )
                 else:
-                    log.warning(
+                    self.log.warning(
                         "deletion NOT reported (send failed): chat [%s] msg %s: %r",
                         self.chat_label(stored.chat_id),
                         stored.msg_id,
                         preview,
                     )
             except Exception:
-                log.exception("on_message_deleted failed for msg_id %s", msg_id)
+                self.log.exception("on_message_deleted failed for msg_id %s", msg_id)

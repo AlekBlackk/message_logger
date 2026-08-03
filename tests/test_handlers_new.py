@@ -324,3 +324,21 @@ async def test_media_with_unsafe_extension_falls_back_to_bin(tmp_path):
     assert stored.media_path is not None
     assert stored.media_path.endswith(".bin")
     db.close()
+
+
+async def test_custom_logger_is_used_for_internal_logging(tmp_path, caplog):
+    custom = __import__("logging").getLogger("acct.test1")
+    client = FakeClient()
+    db = Storage(tmp_path / "db.sqlite")
+    cfg = make_config(tmp_path, max_media_mb=1)
+    logger = MessageLogger(
+        client=client, storage=db, config=cfg, log_target_id=777,
+        watch_ids=set(), ignore_ids={777}, log=custom,
+    )
+    assert logger.log is custom
+
+    file = types.SimpleNamespace(size=5 * 1024 * 1024, ext=".mp4", mime_type="video/mp4")
+    with caplog.at_level("INFO", logger="acct.test1"):
+        await logger.on_new_message(fake_event(media=object(), file=file))
+    assert any(r.name == "acct.test1" for r in caplog.records)
+    db.close()
