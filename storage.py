@@ -215,6 +215,56 @@ class Storage:
         self.conn.commit()
         return paths
 
+    def _purge_conditions(
+        self, cutoff_ts: int | None, chat_id: int | None
+    ) -> tuple[str, list[int]]:
+        """Build the WHERE conditions shared by count_purge_candidates and purge.
+        Requiring at least one filter keeps a bare (None, None) call from ever
+        matching the whole table."""
+        conditions = []
+        params: list[int] = []
+        if cutoff_ts is not None:
+            conditions.append("date < ?")
+            params.append(cutoff_ts)
+        if chat_id is not None:
+            conditions.append("chat_id = ?")
+            params.append(chat_id)
+        if not conditions:
+            raise ValueError("cutoff_ts and chat_id cannot both be None")
+        return " AND ".join(conditions), params
+
+    def count_purge_candidates(
+        self, cutoff_ts: int | None, chat_id: int | None
+    ) -> tuple[int, int]:
+        """Return (message_count, media_count) matching the scope, for a
+        /purge dry-run report."""
+        where, params = self._purge_conditions(cutoff_ts, chat_id)
+        total = self.conn.execute(
+            f"SELECT COUNT(*) FROM messages WHERE {where}", params
+        ).fetchone()[0]
+        media = self.conn.execute(
+            f"SELECT COUNT(*) FROM messages WHERE {where} AND media_path IS NOT NULL",
+            params,
+        ).fetchone()[0]
+        return total, media
+
+    def purge(self, cutoff_ts: int | None, chat_id: int | None) -> list[str]:
+        """Drop rows matching the scope, returning media paths to unlink."""
+        where, params = self._purge_conditions(cutoff_ts, chat_id)
+        rows = self.conn.execute(
+            f"SELECT media_path FROM messages WHERE {where} AND media_path IS NOT NULL",
+            params,
+        ).fetchall()
+        paths = [r["media_path"] for r in rows]
+        self.conn.execute(
+            "DELETE FROM edits WHERE (chat_id, msg_id) IN "
+            f"(SELECT chat_id, msg_id FROM messages WHERE {where})",
+            params,
+        )
+        self.conn.execute(f"DELETE FROM messages WHERE {where}", params)
+        self.conn.commit()
+        return paths
+
     def close(self) -> None:
         self.conn.close()
 

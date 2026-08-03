@@ -1,3 +1,5 @@
+import pytest
+
 from storage import StoredMessage, Storage
 
 
@@ -163,4 +165,84 @@ def test_remove_watch_missing_row_is_a_noop(tmp_path):
     db = open_db(tmp_path)
     db.remove_watch(-1001)  # must not raise
     assert db.list_watch() == []
+    db.close()
+
+
+def test_count_purge_candidates_by_age(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=100, media_path="media/1.jpg"))
+    db.save_message(make_msg(msg_id=2, date=100, media_path=None))
+    db.save_message(make_msg(msg_id=3, date=500))
+    total, media = db.count_purge_candidates(300, None)
+    assert (total, media) == (2, 1)
+    db.close()
+
+
+def test_count_purge_candidates_by_chat(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+    total, media = db.count_purge_candidates(None, -1001)
+    assert (total, media) == (1, 0)
+    db.close()
+
+
+def test_count_purge_candidates_by_chat_and_age(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1001, msg_id=2, date=500))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+    total, media = db.count_purge_candidates(300, -1001)
+    assert (total, media) == (1, 0)
+    db.close()
+
+
+def test_count_purge_candidates_zero_match(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=500))
+    total, media = db.count_purge_candidates(300, None)
+    assert (total, media) == (0, 0)
+    db.close()
+
+
+def test_count_purge_candidates_requires_a_filter(tmp_path):
+    db = open_db(tmp_path)
+    with pytest.raises(ValueError):
+        db.count_purge_candidates(None, None)
+    db.close()
+
+
+def test_purge_by_chat_removes_rows_and_returns_media(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100, media_path="media/1.jpg"))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100, media_path="media/2.jpg"))
+    db.add_edit(-1001, 1, "a", "b", 100)
+
+    paths = db.purge(None, -1001)
+
+    assert paths == ["media/1.jpg"]
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1002, 1) is not None
+    assert db.get_edits(-1001, 1) == []
+    db.close()
+
+
+def test_purge_by_chat_and_age_combines_filters(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1001, msg_id=2, date=500))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+
+    db.purge(300, -1001)
+
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1001, 2) is not None
+    assert db.find_message(-1002, 1) is not None
+    db.close()
+
+
+def test_purge_requires_a_filter(tmp_path):
+    db = open_db(tmp_path)
+    with pytest.raises(ValueError):
+        db.purge(None, None)
     db.close()
