@@ -26,10 +26,14 @@ def _when(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _header(msg: StoredMessage, title: str) -> list[str]:
+def _header(msg: StoredMessage, title: str, username: str | None = None) -> list[str]:
+    chat_line = f"<b>Чат:</b> {_esc(msg.chat_title, 'без названия')}"
+    if username:
+        chat_line += f" (@{html.escape(username)})"
+    chat_line += f" (<code>{msg.chat_id}</code>)"
     return [
         title,
-        f"<b>Чат:</b> {_esc(msg.chat_title, 'без названия')} (<code>{msg.chat_id}</code>)",
+        chat_line,
         f"<b>Автор:</b> {_esc(msg.sender_name, 'неизвестен')} "
         f"(<code>{msg.sender_id if msg.sender_id is not None else '?'}</code>)",
         f"<b>Отправлено:</b> {_when(msg.date)}",
@@ -48,20 +52,23 @@ def _body(
     return "<i>без текста</i>"
 
 
-def format_deleted(msg: StoredMessage) -> str:
-    lines = _header(msg, "🗑 <b>Удалённое сообщение</b>")
+def format_deleted(msg: StoredMessage, username: str | None = None) -> str:
+    lines = _header(msg, "🗑 <b>Удалённое сообщение</b>", username)
     lines.append("")
     lines.append(_body(msg.text, msg.media_type))
     return "\n".join(lines)
 
 
 def format_edited(
-    msg: StoredMessage, old_text: str | None, new_text: str | None
+    msg: StoredMessage,
+    old_text: str | None,
+    new_text: str | None,
+    username: str | None = None,
 ) -> str:
     # Two bodies in one message — halve the budget so the report stays under
     # Telegram's 4096-character ceiling.
     half = MAX_TEXT_LEN // 2
-    lines = _header(msg, "✏️ <b>Сообщение отредактировано</b>")
+    lines = _header(msg, "✏️ <b>Сообщение отредактировано</b>", username)
     lines.append("")
     lines.append("<b>Было:</b>")
     lines.append(_body(old_text, msg.media_type, half))

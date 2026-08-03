@@ -106,6 +106,7 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
             is_channel = isinstance(entity, Channel)
             chat_title = utils.get_display_name(entity) or logger.chat_title(peer_id)
             logger.seed_chat_title(peer_id, chat_title)
+            logger.seed_chat_username(peer_id, getattr(entity, "username", None))
             async for message in client.iter_messages(peer_id, limit=cfg.backfill_limit):
                 await logger.store_message(
                     message,
@@ -120,7 +121,9 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
         except Exception:
             log.exception("backfill failed for chat %s", peer_id)
         total += cached
-        log.info("backfill: cached %s messages from %s", cached, peer_id)
+        log.info(
+            "backfill: cached %s messages from [%s]", cached, logger.chat_label(peer_id)
+        )
         await asyncio.sleep(BACKFILL_PAUSE_SEC)
     log.info("backfill done: %s messages", total)
     return total

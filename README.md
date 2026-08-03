@@ -1,61 +1,60 @@
 # message_log
 
-Telethon userbot that caches incoming Telegram messages and reports deletions and
-edits to Saved Messages, with the original media attached.
+Юзербот на Telethon: кеширует входящие сообщения Telegram и присылает в Избранное
+отчёты об удалении и редактировании, с оригинальными медиафайлами.
 
-Personal account, personal use. Requires MTProto — the Bot API has no deletion event.
+Личный аккаунт, для личного использования. Требует MTProto — у Bot API нет события удаления.
 
-## Setup
+## Установка
 
-Requires Python 3.10+.
+Нужен Python 3.10+.
 
 1. `pip install -r requirements.txt`
-2. `cp .env.example .env` and fill `API_ID` / `API_HASH` from https://my.telegram.org
-3. `python main.py` — Telethon asks for your phone, the login code and, if enabled,
-   your 2FA password. A `<SESSION_NAME>.session` file is created.
+2. `cp .env.example .env` и заполните `API_ID` / `API_HASH` с https://my.telegram.org
+3. `python main.py` — Telethon запросит номер телефона, код входа и, если включена
+   двухфакторная аутентификация, пароль. Будет создан файл `<SESSION_NAME>.session`.
 
-## Configuration
+## Конфигурация
 
-| Variable | Meaning |
+| Переменная | Значение |
 | --- | --- |
-| `API_ID`, `API_HASH` | Credentials from my.telegram.org. Required. |
-| `SESSION_NAME` | Session file name. Default `logger`. |
-| `WATCH_CHATS` | Comma-separated ids or `@usernames`. Empty = every chat. |
-| `IGNORE_CHATS` | Chats to skip. `LOG_TARGET` is always added automatically. |
-| `LOG_TARGET` | Where reports go. `me` = Saved Messages. |
-| `LOG_OUTGOING` | Also log your own deleted messages. |
-| `LOG_EDITS` | Send a report when a message is edited. |
-| `DOWNLOAD_MEDIA`, `MAX_MEDIA_MB`, `MEDIA_DIR` | Media capture settings. |
-| `DB_PATH`, `RETENTION_DAYS` | Cache location and how long rows live. |
-| `BACKFILL_ON_START`, `BACKFILL_LIMIT` | Warm the cache at startup. Needs a non-empty `WATCH_CHATS`. |
-| `PROXY_ENABLED`, `PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT` | SOCKS/HTTP proxy. |
+| `API_ID`, `API_HASH` | Данные с my.telegram.org. Обязательны. |
+| `SESSION_NAME` | Имя файла сессии. По умолчанию `logger`. |
+| `WATCH_CHATS` | Id или `@username` через запятую. Пусто = все чаты. |
+| `IGNORE_CHATS` | Чаты, которые нужно пропускать. `LOG_TARGET` добавляется автоматически. |
+| `LOG_TARGET` | Куда слать отчёты. `me` = Избранное. |
+| `LOG_OUTGOING` | Также логировать удаление собственных сообщений. |
+| `LOG_EDITS` | Присылать отчёт при редактировании сообщения. |
+| `DOWNLOAD_MEDIA`, `MAX_MEDIA_MB`, `MEDIA_DIR` | Настройки сохранения медиа. |
+| `DB_PATH`, `RETENTION_DAYS` | Расположение кеша и срок хранения строк. |
+| `BACKFILL_ON_START`, `BACKFILL_LIMIT` | Прогрев кеша при старте. Нужен непустой `WATCH_CHATS`. |
+| `PROXY_ENABLED`, `PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT` | SOCKS/HTTP прокси. |
 
-Values in `.env` take precedence over any same-named variable already set in your
-shell environment.
+Значения из `.env` имеют приоритет над одноимёнными переменными окружения оболочки.
 
-## How it works
+## Как это работает
 
-Every incoming message is written to SQLite along with its media, because after a
-deletion the file reference on Telegram's servers is dead. When a deletion event
-arrives it carries only message ids — and a chat id only for channels and
-supergroups — so the cache is what makes a useful report possible at all.
+Каждое входящее сообщение записывается в SQLite вместе с медиа, потому что после
+удаления ссылка на файл на серверах Telegram становится нерабочей. Событие удаления
+несёт только id сообщений — а id чата есть лишь для каналов и супергрупп, — поэтому
+без кеша осмысленный отчёт вообще невозможен.
 
-## Limits
+## Ограничения
 
-- If the bot is offline when a message is deleted, no report is produced. The cached
-  copy stays, but the event is gone.
-- Backfill only runs for an explicit `WATCH_CHATS` list.
-- `RETENTION_DAYS` also deletes the cached media files for purged rows, not just the
-  database rows.
-- Message edit history is recorded in the database (`edits` table) but not currently
-  surfaced in deletion/edit reports — `format_deleted` only shows the most recent
-  text. This is intentional groundwork for a future history command, not a bug.
+- Если бот офлайн в момент удаления сообщения, отчёт не формируется. Кешированная
+  копия остаётся, но само событие теряется.
+- Backfill запускается только при явном списке `WATCH_CHATS`.
+- `RETENTION_DAYS` удаляет и кешированные медиафайлы для вычищенных строк, а не
+  только строки в базе.
+- История редактирования сообщений пишется в базу (таблица `edits`), но пока не
+  показывается в отчётах об удалении/редактировании — `format_deleted` выводит
+  только последний текст. Это задел под будущую команду истории, а не баг.
 
-## Security
+## Безопасность
 
-The `.session` file is full access to your account. Never commit it, never share it.
-`.gitignore` already covers `*.session`, `*.db*`, `.env` and `media/`.
+Файл `.session` даёт полный доступ к вашему аккаунту. Никогда не коммитьте и не
+передавайте его. `.gitignore` уже покрывает `*.session`, `*.db*`, `.env` и `media/`.
 
-## Tests
+## Тесты
 
 `pip install -r requirements-dev.txt && python -m pytest`

@@ -9,7 +9,11 @@ import re
 from pathlib import Path
 
 from telethon import events, utils
-from telethon.errors import FloodWaitError, MediaCaptionTooLongError
+from telethon.errors import (
+    FloodWaitError,
+    MediaCaptionTooLongError,
+    PhotoInvalidDimensionsError,
+)
 
 import reports
 from config import Config
@@ -39,6 +43,7 @@ class MessageLogger:
         # get_entity per message triggers FloodWait — keep names in memory instead
         self._names: dict[int, str] = {}
         self._titles: dict[int, str] = {}
+        self._usernames: dict[int, str] = {}
 
     # --- wiring -----------------------------------------------------------
 
@@ -71,6 +76,9 @@ class MessageLogger:
             title = utils.get_display_name(chat)
             if title:
                 self._titles[chat_id] = title
+            username = getattr(chat, "username", None)
+            if username:
+                self._usernames[chat_id] = username
 
     def sender_name(self, sender_id: int | None) -> str | None:
         if sender_id is None:
@@ -80,10 +88,24 @@ class MessageLogger:
     def chat_title(self, chat_id: int) -> str | None:
         return self._titles.get(chat_id)
 
+    def chat_username(self, chat_id: int) -> str | None:
+        return self._usernames.get(chat_id)
+
+    def chat_label(self, chat_id: int) -> str:
+        """Display title plus @username when known, falling back to the raw id."""
+        label = self._titles.get(chat_id) or str(chat_id)
+        username = self._usernames.get(chat_id)
+        return f"{label} (@{username})" if username else label
+
     def seed_chat_title(self, peer_id: int, title: str | None) -> None:
         """Prime the title cache from a source other than a live event (e.g. backfill)."""
         if title:
             self._titles[peer_id] = title
+
+    def seed_chat_username(self, peer_id: int, username: str | None) -> None:
+        """Prime the username cache from a source other than a live event (e.g. backfill)."""
+        if username:
+            self._usernames[peer_id] = username
 
     # --- storing ----------------------------------------------------------
 
@@ -116,11 +138,29 @@ class MessageLogger:
         )
         self.storage.save_message(row, overwrite=overwrite)
 
+    @staticmethod
+    def _media_label(message) -> str:
+        """Human-readable media kind, using Telethon's convenience properties
+        (raw media class name doesn't tell a video apart from a plain file)."""
+        for attr, label in (
+            ("photo", "фото"),
+            ("video", "видео"),
+            ("video_note", "видеосообщение"),
+            ("voice", "голосовое"),
+            ("audio", "аудио"),
+            ("sticker", "стикер"),
+            ("gif", "гиф"),
+            ("document", "файл"),
+        ):
+            if getattr(message, attr, None) is not None:
+                return label
+        return type(message.media).__name__
+
     async def capture_media(self, message, peer_id: int) -> tuple[str | None, str | None]:
         """Download media now — after deletion the file reference is dead."""
         if message.media is None:
             return None, None
-        media_type = type(message.media).__name__
+        media_type = self._media_label(message)
         file = getattr(message, "file", None)
         if not self.config.download_media or file is None:
             return None, media_type
@@ -143,7 +183,7 @@ class MessageLogger:
 
     # --- sending ----------------------------------------------------------
 
-    async def send_report(self, text: str, media_path: str | None = None) -> None:
+    async def send_report(self, text: str, media_path: str | None = None) -> bool:
         for attempt in (1, 2):
             try:
                 if media_path and os.path.exists(media_path):
@@ -164,6 +204,18 @@ class MessageLogger:
                             parse_mode="html",
                             link_preview=False,
                         )
+                    except PhotoInvalidDimensionsError:
+                        log.warning(
+                            "photo dimensions rejected, resending %s as a document",
+                            media_path,
+                        )
+                        await self.client.send_file(
+                            self.log_target_id,
+                            media_path,
+                            caption=text,
+                            parse_mode="html",
+                            force_document=True,
+                        )
                 else:
                     await self.client.send_message(
                         self.log_target_id,
@@ -171,16 +223,17 @@ class MessageLogger:
                         parse_mode="html",
                         link_preview=False,
                     )
-                return
+                return True
             except FloodWaitError as exc:
                 if attempt == 2:
                     log.error("flood wait again (%ss), dropping report", exc.seconds)
-                    return
+                    return False
                 log.warning("flood wait %ss, retrying report", exc.seconds)
                 await asyncio.sleep(exc.seconds + 1)
             except Exception:
                 log.exception("failed to send report")
-                return
+                return False
+        return False
 
     # --- handlers ---------------------------------------------------------
 
@@ -231,7 +284,9 @@ class MessageLogger:
             self.storage.update_text(peer_id, event.message.id, new_text)
             if self.config.log_edits:
                 await self.send_report(
-                    reports.format_edited(previous, previous.text, new_text)
+                    reports.format_edited(
+                        previous, previous.text, new_text, self.chat_username(peer_id)
+                    )
                 )
         except Exception:
             log.exception("on_message_edited failed")
@@ -251,8 +306,26 @@ class MessageLogger:
                 if not self.is_tracked(stored.chat_id):
                     continue
                 self.storage.mark_deleted(stored.chat_id, stored.msg_id)
-                await self.send_report(
-                    reports.format_deleted(stored), media_path=stored.media_path
+                sent = await self.send_report(
+                    reports.format_deleted(stored, self.chat_username(stored.chat_id)),
+                    media_path=stored.media_path,
                 )
+                preview = reports.truncate(stored.text, 80) or (
+                    f"[{stored.media_type}]" if stored.media_type else ""
+                )
+                if sent:
+                    log.info(
+                        "deletion reported: chat [%s] msg %s: %r",
+                        self.chat_label(stored.chat_id),
+                        stored.msg_id,
+                        preview,
+                    )
+                else:
+                    log.warning(
+                        "deletion NOT reported (send failed): chat [%s] msg %s: %r",
+                        self.chat_label(stored.chat_id),
+                        stored.msg_id,
+                        preview,
+                    )
             except Exception:
                 log.exception("on_message_deleted failed for msg_id %s", msg_id)

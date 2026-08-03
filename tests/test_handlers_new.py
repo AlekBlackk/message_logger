@@ -280,6 +280,42 @@ async def test_send_report_falls_back_to_text_when_caption_too_long(tmp_path):
     db.close()
 
 
+async def test_send_report_retries_as_document_on_bad_photo_dimensions(tmp_path):
+    from telethon.errors import PhotoInvalidDimensionsError
+
+    path = tmp_path / "f.jpg"
+    path.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+
+    calls = []
+
+    async def flaky_send_file(_target, _file, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise PhotoInvalidDimensionsError(request=None)
+        client.files.append((_target, _file, kw))
+
+    client.send_file = flaky_send_file
+    ok = await logger.send_report("caption", media_path=str(path))
+    assert ok is True
+    assert len(calls) == 2
+    assert calls[1]["force_document"] is True
+    assert len(client.files) == 1
+    db.close()
+
+
+async def test_send_report_returns_false_on_failure(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+
+    async def failing_send_message(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    client.send_message = failing_send_message
+    ok = await logger.send_report("hello")
+    assert ok is False
+    db.close()
+
+
 async def test_media_with_unsafe_extension_falls_back_to_bin(tmp_path):
     file = types.SimpleNamespace(size=10, ext="/../../evil", mime_type="application/octet-stream")
     logger, client, db = make_logger(tmp_path)

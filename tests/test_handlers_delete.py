@@ -155,6 +155,28 @@ async def test_mixed_batch_trackable_and_ignored(tmp_path):
     db.close()
 
 
+async def test_failed_send_is_not_logged_as_reported(tmp_path, caplog):
+    """send_report failing (e.g. Telegram rejects the upload) must not be
+    logged as a successful delivery."""
+    import logging
+
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=5, is_channel=True, text="secret")
+
+    async def failing_send_message(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    client.send_message = failing_send_message
+    with caplog.at_level(logging.INFO, logger="handlers"):
+        await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    assert not any("deletion reported" in r.message for r in caplog.records)
+    assert any(
+        "NOT reported" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+    db.close()
+
+
 async def test_batch_with_missing_and_present(tmp_path):
     """One id in the batch was never cached; the other was — the cached one
     must still be reported."""
