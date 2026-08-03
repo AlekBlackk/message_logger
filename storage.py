@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS edits (
     date     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_edits_msg ON edits(chat_id, msg_id);
+
+CREATE TABLE IF NOT EXISTS watch_chats (
+    chat_id  INTEGER PRIMARY KEY,
+    label    TEXT,
+    added_at INTEGER NOT NULL
+);
 """
 
 _COLUMNS = (
@@ -149,6 +155,24 @@ class Storage:
             (chat_id, msg_id),
         ).fetchall()
         return [(r["old_text"], r["new_text"], r["date"]) for r in rows]
+
+    def add_watch(self, chat_id: int, label: str | None, added_at: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO watch_chats (chat_id, label, added_at) "
+            "VALUES (?, ?, ?)",
+            (chat_id, label, added_at),
+        )
+        self.conn.commit()
+
+    def remove_watch(self, chat_id: int) -> None:
+        self.conn.execute("DELETE FROM watch_chats WHERE chat_id = ?", (chat_id,))
+        self.conn.commit()
+
+    def list_watch(self) -> list[tuple[int, str | None, int]]:
+        rows = self.conn.execute(
+            "SELECT chat_id, label, added_at FROM watch_chats ORDER BY added_at ASC"
+        ).fetchall()
+        return [(r["chat_id"], r["label"], r["added_at"]) for r in rows]
 
     def purge_older_than(self, cutoff_ts: int) -> list[str]:
         """Drop rows older than cutoff_ts, returning media paths to unlink."""

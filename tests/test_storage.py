@@ -138,3 +138,29 @@ def test_wal_mode_enabled(tmp_path):
     mode = db.conn.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
     db.close()
+
+
+def test_add_list_remove_watch(tmp_path):
+    db = open_db(tmp_path)
+    assert db.list_watch() == []
+    db.add_watch(-1001, "Chat A", 1000)
+    db.add_watch(-1002, None, 1001)
+    assert db.list_watch() == [(-1001, "Chat A", 1000), (-1002, None, 1001)]
+    db.remove_watch(-1001)
+    assert db.list_watch() == [(-1002, None, 1001)]
+    db.close()
+
+
+def test_add_watch_replaces_existing_row(tmp_path):
+    db = open_db(tmp_path)
+    db.add_watch(-1001, "old label", 1000)
+    db.add_watch(-1001, "new label", 2000)
+    assert db.list_watch() == [(-1001, "new label", 2000)]
+    db.close()
+
+
+def test_remove_watch_missing_row_is_a_noop(tmp_path):
+    db = open_db(tmp_path)
+    db.remove_watch(-1001)  # must not raise
+    assert db.list_watch() == []
+    db.close()
