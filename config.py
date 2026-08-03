@@ -138,3 +138,21 @@ def load_config(env_path: str = ".env") -> Config:
         proxy_host=(values.get("PROXY_HOST") or "127.0.0.1").strip(),
         proxy_port=proxy_port,
     )
+
+
+def load_account_configs(default_env_path: str = ".env") -> list[tuple[str, Config]]:
+    """One (label, Config) pair per account. ACCOUNTS_ENV is read from the real
+    OS environment, never from a .env file — it names which .env files to load,
+    so it can't live inside one of them. It's a comma-separated list of paths;
+    each file is a complete, independent single-account config (same schema as
+    load_config). label is the filename stem, used for per-account logging.
+
+    Unset ACCOUNTS_ENV falls back to today's single-account behavior: one
+    Config loaded from default_env_path, labeled by its own session_name.
+    """
+    raw = os.environ.get("ACCOUNTS_ENV", "")
+    paths = [p.strip() for p in raw.split(",") if p.strip()]
+    if not paths:
+        cfg = load_config(default_env_path)
+        return [(cfg.session_name, cfg)]
+    return [(Path(p).stem, load_config(p)) for p in paths]

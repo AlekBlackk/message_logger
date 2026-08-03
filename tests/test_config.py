@@ -1,6 +1,6 @@
 import pytest
 
-from config import Config, ConfigError, load_config, parse_chat_list
+from config import Config, ConfigError, load_account_configs, load_config, parse_chat_list
 
 
 def test_parse_chat_list_empty():
@@ -156,3 +156,42 @@ def test_log_edits_typo_raises(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(env)
     assert "LOG_EDITS" in str(exc.value)
+
+
+def test_load_account_configs_falls_back_to_single_account(tmp_path, monkeypatch):
+    monkeypatch.delenv("ACCOUNTS_ENV", raising=False)
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nSESSION_NAME=solo\n")
+    accounts = load_account_configs(default_env_path=env)
+    assert len(accounts) == 1
+    label, cfg = accounts[0]
+    assert label == "solo"
+    assert cfg.api_id == 1
+
+
+def test_load_account_configs_reads_multiple_files(tmp_path, monkeypatch):
+    env1 = tmp_path / "acc1.env"
+    env1.write_text("API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\n", encoding="utf-8")
+    env2 = tmp_path / "acc2.env"
+    env2.write_text("API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\n", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
+    accounts = load_account_configs()
+    assert [label for label, _cfg in accounts] == ["acc1", "acc2"]
+    assert accounts[0][1].api_id == 1
+    assert accounts[1][1].api_id == 2
+
+
+def test_load_account_configs_drops_blank_entries(tmp_path, monkeypatch):
+    env1 = tmp_path / "acc1.env"
+    env1.write_text("API_ID=1\nAPI_HASH=h1\n", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNTS_ENV", f" ,{env1}, ,")
+    accounts = load_account_configs()
+    assert len(accounts) == 1
+    assert accounts[0][0] == "acc1"
+
+
+def test_load_account_configs_propagates_config_error(tmp_path, monkeypatch):
+    bad = tmp_path / "bad.env"
+    bad.write_text("API_ID=1\n", encoding="utf-8")  # missing API_HASH
+    monkeypatch.setenv("ACCOUNTS_ENV", str(bad))
+    with pytest.raises(ConfigError):
+        load_account_configs()
