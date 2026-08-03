@@ -222,6 +222,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
             config=cfg,
             log_target_id=log_target_id,
             backfill_fn=backfill_one_chat,
+            account_label=label,
         )
         commands_handler.register()
 

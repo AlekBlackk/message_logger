@@ -63,7 +63,7 @@ class FakeEvent:
         self.message = FakeMessage(text, reply)
 
 
-def make_handler(tmp_path, *, entities=None, watch=None):
+def make_handler(tmp_path, *, entities=None, watch=None, account_label=""):
     client = FakeClient(entities=entities)
     db = Storage(tmp_path / "db.sqlite")
     cfg = make_config(tmp_path)
@@ -80,6 +80,7 @@ def make_handler(tmp_path, *, entities=None, watch=None):
     handler = CommandHandler(
         client=client, storage=db, logger=logger, config=cfg,
         log_target_id=777, backfill_fn=fake_backfill,
+        account_label=account_label,
     )
     return handler, client, db, calls
 
@@ -168,6 +169,22 @@ async def test_list_reports_watched_chats(tmp_path):
     await handler.on_command(FakeEvent("/list"))
     assert "Chat A" in client.sent[-1][1]
     assert "-1001" in client.sent[-1][1]
+    db.close()
+
+
+async def test_list_tags_rows_with_account_label(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path, account_label="acc1")
+    db.add_watch(-1001, "Chat A", 1000)
+    await handler.on_command(FakeEvent("/list"))
+    assert "acc1" in client.sent[-1][1]
+    db.close()
+
+
+async def test_list_omits_tag_without_account_label(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.add_watch(-1001, "Chat A", 1000)
+    await handler.on_command(FakeEvent("/list"))
+    assert "·" not in client.sent[-1][1]
     db.close()
 
 

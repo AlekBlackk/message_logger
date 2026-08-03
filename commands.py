@@ -38,6 +38,7 @@ class CommandHandler:
         config: Config,
         log_target_id: int,
         backfill_fn: BackfillFn,
+        account_label: str = "",
     ) -> None:
         self.client = client
         self.storage = storage
@@ -45,6 +46,7 @@ class CommandHandler:
         self.config = config
         self.log_target_id = log_target_id
         self.backfill_fn = backfill_fn
+        self.account_label = account_label
 
     def register(self) -> None:
         self.client.add_event_handler(
@@ -124,9 +126,12 @@ class CommandHandler:
             await self.logger.send_report("Слежу за всеми чатами (список пуст).")
             return
         lines = ["<b>Отслеживаемые чаты:</b>"]
+        account_tag = f" · {html.escape(self.account_label)}" if self.account_label else ""
         for chat_id, label, _added_at in rows:
             title = label or self.logger.chat_title(chat_id) or str(chat_id)
             username = self.logger.chat_username(chat_id)
             display = f"{title} (@{username})" if username else title
-            lines.append(f"— {html.escape(display)} (<code>{chat_id}</code>)")
+            lines.append(
+                f"— {html.escape(display)} (<code>{chat_id}</code>){account_tag}"
+            )
         await self.logger.send_report("\n".join(lines))
