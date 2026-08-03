@@ -1,3 +1,4 @@
+import time
 import types
 
 import pytest
@@ -7,6 +8,7 @@ from commands import CommandHandler
 from handlers import MessageLogger
 from storage import Storage
 from tests.test_handlers_new import make_config
+from tests.test_storage import make_msg
 
 pytestmark = pytest.mark.asyncio
 
@@ -228,4 +230,102 @@ async def test_unknown_slash_command_ignored(tmp_path):
     handler, client, db, _calls = make_handler(tmp_path)
     await handler.on_command(FakeEvent("/foo bar"))
     assert client.sent == []
+    db.close()
+
+
+async def test_purge_no_args_shows_usage(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/purge"))
+    assert client.sent
+    assert "confirm" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_by_days_dry_run_reports_count(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100, media_path="media/1.jpg"))
+    await handler.on_command(FakeEvent("/purge 30"))
+    assert db.find_message(-1001, 1) is not None
+    assert "1" in client.sent[-1][1]
+    assert "confirm" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_by_days_confirm_deletes(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert "✅" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_by_chat_dry_run(tmp_path):
+    handler, client, db, _calls = make_handler(
+        tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
+    )
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge @a"))
+    assert db.find_message(-1001, 1) is not None
+    assert db.find_message(-1002, 1) is not None
+    assert "Chat A" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_by_chat_confirm_deletes_only_that_chat(tmp_path):
+    handler, client, db, _calls = make_handler(
+        tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
+    )
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge @a confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1002, 1) is not None
+    db.close()
+
+
+async def test_purge_by_chat_and_days(tmp_path):
+    """The `<days>` arg is converted to a real wall-clock cutoff (now - N days),
+    so this needs dates relative to time.time() — a small fixed date like 100
+    would always be "older" regardless of N and wouldn't exercise the filter."""
+    handler, client, db, _calls = make_handler(
+        tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
+    )
+    now = int(time.time())
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 10 * 86400))
+    db.save_message(make_msg(chat_id=-1001, msg_id=2, date=now - 1 * 86400))
+    await handler.on_command(FakeEvent("/purge @a 3 confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1001, 2) is not None
+    db.close()
+
+
+async def test_purge_zero_candidates_short_circuits(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert "Нечего" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_rejects_non_positive_days(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/purge 0"))
+    assert "⚠️" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_rejects_too_many_args(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/purge @a 3 4 confirm"))
+    assert "⚠️" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_resolve_failure_replies_with_error_and_does_not_touch_db(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path, entities={})
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge @missing confirm"))
+    assert db.find_message(-1001, 1) is not None
+    assert "⚠️" in client.sent[-1][1]
     db.close()
