@@ -54,6 +54,22 @@ def _is_int(value: str) -> bool:
     return True
 
 
+async def load_watch_ids(client, storage: Storage, cfg: Config) -> set[int]:
+    """The watch_chats table is the source of truth; WATCH_CHATS in .env is
+    only consulted once, to seed the table when the database is still empty."""
+    existing = storage.list_watch()
+    if existing:
+        return {chat_id for chat_id, _label, _added_at in existing}
+    if not cfg.watch_chats:
+        return set()
+    resolved = await resolve_peer_ids(client, cfg.watch_chats)
+    now = int(time.time())
+    for peer_id in resolved:
+        storage.add_watch(peer_id, None, now)
+    log.info("migrated %s chat(s) from WATCH_CHATS into the database", len(resolved))
+    return resolved
+
+
 def build_client(cfg: Config) -> TelegramClient:
     return TelegramClient(
         cfg.session_name,
@@ -84,10 +100,36 @@ BACKFILL_PAUSE_SEC = 1
 BACKFILL_MEDIA_PAUSE_SEC = 0.5
 
 
+async def backfill_one_chat(client, logger: MessageLogger, cfg: Config, peer_id: int) -> int:
+    """Cache one chat's recent history. Never raises — logs and returns the
+    partial count on failure, so a bad chat can't abort the whole run."""
+    cached = 0
+    try:
+        entity = await client.get_entity(peer_id)
+        is_channel = isinstance(entity, Channel)
+        chat_title = utils.get_display_name(entity) or logger.chat_title(peer_id)
+        logger.seed_chat_title(peer_id, chat_title)
+        logger.seed_chat_username(peer_id, getattr(entity, "username", None))
+        async for message in client.iter_messages(peer_id, limit=cfg.backfill_limit):
+            await logger.store_message(
+                message,
+                peer_id=peer_id,
+                is_channel=is_channel,
+                chat_title=chat_title,
+                overwrite=False,
+            )
+            cached += 1
+            if message.media is not None:
+                await asyncio.sleep(BACKFILL_MEDIA_PAUSE_SEC)
+    except Exception:
+        log.exception("backfill failed for chat %s", peer_id)
+    return cached
+
+
 async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[int]) -> int:
     """Warm the cache with recent history for explicitly watched chats.
 
-    Runs only against an explicit WATCH_CHATS list — sweeping every dialog of an
+    Runs only against an explicit watch list — sweeping every dialog of an
     account with hundreds of chats invites FloodWait with no upper bound.
     Existing rows are never overwritten, so a deleted=1 flag survives a restart.
     Sends no reports: this is cache filling, not an event.
@@ -95,31 +137,12 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
     if not cfg.backfill_on_start:
         return 0
     if not watch_ids:
-        log.info("backfill skipped: WATCH_CHATS is empty (watching all chats)")
+        log.info("backfill skipped: watch list is empty (watching all chats)")
         return 0
 
     total = 0
     for peer_id in sorted(watch_ids):
-        cached = 0
-        try:
-            entity = await client.get_entity(peer_id)
-            is_channel = isinstance(entity, Channel)
-            chat_title = utils.get_display_name(entity) or logger.chat_title(peer_id)
-            logger.seed_chat_title(peer_id, chat_title)
-            logger.seed_chat_username(peer_id, getattr(entity, "username", None))
-            async for message in client.iter_messages(peer_id, limit=cfg.backfill_limit):
-                await logger.store_message(
-                    message,
-                    peer_id=peer_id,
-                    is_channel=is_channel,
-                    chat_title=chat_title,
-                    overwrite=False,
-                )
-                cached += 1
-                if message.media is not None:
-                    await asyncio.sleep(BACKFILL_MEDIA_PAUSE_SEC)
-        except Exception:
-            log.exception("backfill failed for chat %s", peer_id)
+        cached = await backfill_one_chat(client, logger, cfg, peer_id)
         total += cached
         log.info(
             "backfill: cached %s messages from [%s]", cached, logger.chat_label(peer_id)
@@ -139,7 +162,7 @@ async def run(cfg: Config) -> None:
         log.info("connected as %s", utils.get_display_name(await client.get_me()))
 
         log_target_id = utils.get_peer_id(await client.get_entity(cfg.log_target))
-        watch_ids = await resolve_peer_ids(client, cfg.watch_chats)
+        watch_ids = await load_watch_ids(client, storage, cfg)
         ignore_ids = await resolve_peer_ids(client, cfg.ignore_chats)
         ignore_ids.add(log_target_id)  # never cache our own reports
         log.info(

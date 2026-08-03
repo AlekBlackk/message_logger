@@ -4,7 +4,7 @@ import types
 import pytest
 
 import main
-from tests.test_handlers_new import make_config
+from tests.test_handlers_new import make_config, make_logger
 
 pytestmark = pytest.mark.asyncio
 
@@ -192,3 +192,37 @@ async def test_run_calls_backfill_after_register(tmp_path, monkeypatch):
     await main.run(cfg)
 
     assert call_order == ["register", "backfill"]
+
+
+async def test_load_watch_ids_migrates_env_list_into_empty_db(tmp_path, monkeypatch):
+    _logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, watch_chats=("@a",))
+    client = ResolvingClient({"@a": entity(111)})
+    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
+    ids = await main.load_watch_ids(client, db, cfg)
+    assert ids == {111}
+    rows = db.list_watch()
+    assert len(rows) == 1
+    assert rows[0][0] == 111
+    db.close()
+
+
+async def test_load_watch_ids_prefers_existing_db_rows_over_env(tmp_path, monkeypatch):
+    _logger, _c, db = make_logger(tmp_path)
+    db.add_watch(222, "already there", 500)
+    cfg = make_config(tmp_path, watch_chats=("@a",))
+    client = ResolvingClient({"@a": entity(111)})
+    monkeypatch.setattr(main.utils, "get_peer_id", lambda e: e.id)
+    ids = await main.load_watch_ids(client, db, cfg)
+    assert ids == {222}
+    assert client.asked == []
+    db.close()
+
+
+async def test_load_watch_ids_empty_when_no_env_list_and_empty_db(tmp_path):
+    _logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, watch_chats=())
+    client = ResolvingClient({})
+    ids = await main.load_watch_ids(client, db, cfg)
+    assert ids == set()
+    db.close()

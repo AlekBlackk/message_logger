@@ -191,3 +191,27 @@ async def test_backfill_pauses_after_media_messages(tmp_path, monkeypatch):
 
 async def _no_sleep(_seconds):
     return None
+
+
+async def test_backfill_one_chat_caches_and_returns_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _no_sleep)
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_limit=10)
+    client = HistoryClient({-1001: [fake_message(1), fake_message(2)]})
+    count = await main.backfill_one_chat(client, logger, cfg, -1001)
+    assert count == 2
+    assert db.find_message(-1001, 1) is not None
+    db.close()
+
+
+async def test_backfill_one_chat_returns_zero_on_error(tmp_path):
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_limit=10)
+
+    class FailingClient:
+        async def get_entity(self, _ref):
+            raise ValueError("gone")
+
+    count = await main.backfill_one_chat(FailingClient(), logger, cfg, -1001)
+    assert count == 0
+    db.close()
