@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import types
 
@@ -52,7 +53,7 @@ async def test_backfill_caches_history(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
                       watch_chats=("@a",))
     client = HistoryClient({-1001: [fake_message(1), fake_message(2)]})
-    count = await main.backfill(client, logger, cfg, {-1001})
+    count = await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     assert count == 2
     assert db.find_message(-1001, 1) is not None
     db.close()
@@ -64,7 +65,7 @@ async def test_backfill_respects_limit(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=1,
                       watch_chats=("@a",))
     client = HistoryClient({-1001: [fake_message(1), fake_message(2)]})
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     assert client.calls == [(-1001, 1)]
     db.close()
 
@@ -73,7 +74,7 @@ async def test_backfill_skipped_when_disabled(tmp_path):
     logger, _c, db = make_logger(tmp_path)
     cfg = make_config(tmp_path, backfill_on_start=False, watch_chats=("@a",))
     client = HistoryClient({-1001: [fake_message(1)]})
-    assert await main.backfill(client, logger, cfg, {-1001}) == 0
+    assert await main.backfill(client, logger, cfg, {-1001}, asyncio.Event()) == 0
     assert client.calls == []
     db.close()
 
@@ -83,7 +84,7 @@ async def test_backfill_skipped_without_watch_list(tmp_path):
     logger, _c, db = make_logger(tmp_path)
     cfg = make_config(tmp_path, backfill_on_start=True, watch_chats=())
     client = HistoryClient({-1001: [fake_message(1)]})
-    assert await main.backfill(client, logger, cfg, set()) == 0
+    assert await main.backfill(client, logger, cfg, set(), asyncio.Event()) == 0
     assert client.calls == []
     db.close()
 
@@ -94,9 +95,9 @@ async def test_backfill_does_not_overwrite_deleted_rows(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
                       watch_chats=("@a",))
     client = HistoryClient({-1001: [fake_message(1, text="from history")]})
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     db.mark_deleted(-1001, 1)
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     row = db.find_message(-1001, 1)
     assert row.deleted is True
     db.close()
@@ -108,7 +109,7 @@ async def test_backfill_sends_no_reports(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
                       watch_chats=("@a",))
     client = HistoryClient({-1001: [fake_message(1)]})
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     assert client_fake.sent == []
     assert client_fake.files == []
     db.close()
@@ -133,7 +134,7 @@ async def test_backfill_derives_is_channel_from_entity_type_not_id_shape(tmp_pat
             )
         },
     )
-    await main.backfill(client, logger, cfg, {group_peer_id})
+    await main.backfill(client, logger, cfg, {group_peer_id}, asyncio.Event())
     stored = db.find_message(None, 1)
     assert stored is not None
     assert stored.is_channel is False
@@ -160,7 +161,7 @@ async def test_backfill_populates_chat_title_from_entity(tmp_path, monkeypatch):
         entities={-1001: Chat(id=1001, title="t", photo=None,
                                participants_count=0, date=None, version=0)},
     )
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     stored = db.find_message(-1001, 1)
     assert stored.chat_title == "t"
     db.close()
@@ -183,7 +184,7 @@ async def test_backfill_pauses_after_media_messages(tmp_path, monkeypatch):
             fake_message(2),  # text-only, no media
         ]
     })
-    await main.backfill(client, logger, cfg, {-1001})
+    await main.backfill(client, logger, cfg, {-1001}, asyncio.Event())
     # One media-message pause + one between-chat pause = two sleep calls total
     assert sleep_calls.count(main.BACKFILL_MEDIA_PAUSE_SEC) == 1
     db.close()
@@ -191,6 +192,59 @@ async def test_backfill_pauses_after_media_messages(tmp_path, monkeypatch):
 
 async def _no_sleep(_seconds):
     return None
+
+
+async def test_backfill_stops_early_when_stop_already_set(tmp_path, monkeypatch):
+    """A shutdown requested before backfill() ever gets a turn must not start
+    working through the watch list at all — otherwise Ctrl+C/SIGTERM stays
+    unresponsive for the whole multi-chat backfill window."""
+    monkeypatch.setattr(main.asyncio, "sleep", _no_sleep)
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
+                      watch_chats=("@a", "@b"))
+    client = HistoryClient({
+        -1001: [fake_message(1)],
+        -1002: [fake_message(2)],
+    })
+    stop = asyncio.Event()
+    stop.set()
+    count = await main.backfill(client, logger, cfg, {-1001, -1002}, stop)
+    assert count == 0
+    assert client.calls == []
+    db.close()
+
+
+async def test_backfill_stops_early_when_stop_set_mid_run(tmp_path, monkeypatch):
+    """A shutdown requested while chat N is being cached must skip the
+    remaining chats (and the inter-chat pause) instead of running to
+    completion."""
+    monkeypatch.setattr(main.asyncio, "sleep", _no_sleep)
+    logger, _c, db = make_logger(tmp_path)
+    cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=10,
+                      watch_chats=("@a", "@b"))
+    client = HistoryClient({
+        -1002: [fake_message(1)],
+        -1001: [fake_message(2)],
+    })
+
+    class StopAfterFirstChat:
+        """False on the pre-loop check (so the first chat runs), True on
+        every check after — simulating a shutdown requested mid-backfill."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_set(self):
+            self.calls += 1
+            return self.calls > 1
+
+    stop = StopAfterFirstChat()
+    count = await main.backfill(client, logger, cfg, {-1001, -1002}, stop)
+    # sorted({-1001, -1002}) == [-1002, -1001]: only the first (lowest) chat
+    # is cached before the post-chat stop check breaks the loop.
+    assert count == 1
+    assert client.calls == [(-1002, 10)]
+    db.close()
 
 
 async def test_backfill_one_chat_caches_and_returns_count(tmp_path, monkeypatch):

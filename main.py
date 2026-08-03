@@ -127,13 +127,23 @@ async def backfill_one_chat(client, logger: MessageLogger, cfg: Config, peer_id:
     return cached
 
 
-async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[int]) -> int:
+async def backfill(
+    client,
+    logger: MessageLogger,
+    cfg: Config,
+    watch_ids: set[int],
+    stop: asyncio.Event,
+) -> int:
     """Warm the cache with recent history for explicitly watched chats.
 
     Runs only against an explicit watch list — sweeping every dialog of an
     account with hundreds of chats invites FloodWait with no upper bound.
     Existing rows are never overwritten, so a deleted=1 flag survives a restart.
     Sends no reports: this is cache filling, not an event.
+
+    stop is checked between chats so a shutdown requested mid-backfill (which
+    can run for minutes across many chats) breaks out early instead of leaving
+    Ctrl+C/SIGTERM unresponsive for the whole window.
     """
     if not cfg.backfill_on_start:
         return 0
@@ -143,20 +153,30 @@ async def backfill(client, logger: MessageLogger, cfg: Config, watch_ids: set[in
 
     total = 0
     for peer_id in sorted(watch_ids):
+        if stop.is_set():
+            log.info("backfill: shutdown requested, stopping early")
+            break
         cached = await backfill_one_chat(client, logger, cfg, peer_id)
         total += cached
         log.info(
             "backfill: cached %s messages from [%s]", cached, logger.chat_label(peer_id)
         )
+        if stop.is_set():
+            log.info("backfill: shutdown requested, stopping early")
+            break
         await asyncio.sleep(BACKFILL_PAUSE_SEC)
     log.info("backfill done: %s messages", total)
     return total
 
 
-async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
+async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
     """Runs one account end-to-end. Never raises: an unhandled exception is
     logged and swallowed here so one account's failure can't cancel its
-    siblings under the asyncio.gather() in run_all()."""
+    siblings under the asyncio.gather() in run_all().
+
+    Returns True if the account reached and completed the polling loop
+    normally, False if it crashed before or during that — this lets main()
+    tell a total failure (every account crashed) from a normal shutdown."""
     acc_log = logging.getLogger(f"message_log.{label}")
     try:
         storage = Storage(cfg.db_path)
@@ -164,9 +184,10 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
         # Nothing exists yet to close — log and bail rather than let this
         # escape run_all()'s asyncio.gather(), whose return list is unread.
         acc_log.exception("account %s crashed", label)
-        return
+        return False
     client = None
     retention_task: asyncio.Task | None = None
+    ok = False
     try:
         client = build_client(cfg)
         await client.start()
@@ -204,7 +225,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
         )
         commands_handler.register()
 
-        await backfill(client, logger, cfg, watch_ids)
+        await backfill(client, logger, cfg, watch_ids, stop)
 
         retention_task = asyncio.create_task(retention_loop(cfg, storage))
         # Poll rather than awaiting a single future: on Windows the loop must
@@ -214,6 +235,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
         # network drop no longer shuts the bot down.
         while not stop.is_set() and not client.disconnected.done():
             await asyncio.sleep(1)
+        ok = True
     except Exception:
         acc_log.exception("account %s crashed", label)
     finally:
@@ -238,9 +260,10 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> None:
         except Exception:
             acc_log.exception("account %s: storage close crashed", label)
         acc_log.info("stopped cleanly")
+    return ok
 
 
-async def run_all(accounts: list[tuple[str, Config]]) -> None:
+async def run_all(accounts: list[tuple[str, Config]]) -> list:
     stop = asyncio.Event()
 
     def request_stop(*_args) -> None:
@@ -253,7 +276,7 @@ async def run_all(accounts: list[tuple[str, Config]]) -> None:
         except (ValueError, OSError, AttributeError):
             pass
 
-    await asyncio.gather(
+    return await asyncio.gather(
         *(run_account(label, cfg, stop) for label, cfg in accounts),
         return_exceptions=True,
     )
@@ -266,7 +289,10 @@ def main() -> None:
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(1)
-    asyncio.run(run_all(accounts))
+    results = asyncio.run(run_all(accounts))
+    if not any(result is True for result in results):
+        log.error("all accounts failed to start; exiting with non-zero status")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

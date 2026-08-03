@@ -7,7 +7,10 @@ import pytest
 import main
 from tests.test_handlers_new import make_config, make_logger
 
-pytestmark = pytest.mark.asyncio
+# No module-level pytestmark: asyncio_mode = auto (pytest.ini) already
+# collects async def tests automatically, and this file also has plain sync
+# tests (main() calls asyncio.run() itself, so they must stay sync) that a
+# blanket pytest.mark.asyncio would otherwise warn about.
 
 
 class ResolvingClient:
@@ -103,13 +106,14 @@ async def test_run_account_wires_log_target_into_ignore_set(tmp_path, monkeypatc
 
     monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
 
-    await main.run_account("test", cfg, asyncio.Event())
+    result = await main.run_account("test", cfg, asyncio.Event())
 
     assert captured["log_target_id"] == 777
     assert 777 in captured["ignore_ids"]
     assert 5 in captured["ignore_ids"]
     assert captured["registered"] is True
     assert client.disconnect_calls == 1
+    assert result is True
 
 
 async def test_run_account_closes_storage_when_startup_fails(tmp_path, monkeypatch, caplog):
@@ -130,11 +134,12 @@ async def test_run_account_closes_storage_when_startup_fails(tmp_path, monkeypat
     monkeypatch.setattr(main.Storage, "close", tracking_close)
 
     with caplog.at_level(logging.ERROR):
-        await main.run_account("acc1", cfg, asyncio.Event())
+        result = await main.run_account("acc1", cfg, asyncio.Event())
 
     assert closed, "storage.close() must run even when startup fails"
     assert client.disconnect_calls == 1
     assert any("acc1" in r.message and "crashed" in r.message for r in caplog.records)
+    assert result is False
 
 
 async def test_run_account_closes_storage_when_build_client_fails(tmp_path, monkeypatch, caplog):
@@ -157,10 +162,11 @@ async def test_run_account_closes_storage_when_build_client_fails(tmp_path, monk
     monkeypatch.setattr(main.Storage, "close", tracking_close)
 
     with caplog.at_level(logging.ERROR):
-        await main.run_account("acc1", cfg, asyncio.Event())
+        result = await main.run_account("acc1", cfg, asyncio.Event())
 
     assert closed, "storage.close() must run even when build_client() fails"
     assert any("crashed" in r.message for r in caplog.records)
+    assert result is False
 
 
 async def test_run_account_logs_when_storage_construction_fails(tmp_path, monkeypatch, caplog):
@@ -176,9 +182,10 @@ async def test_run_account_logs_when_storage_construction_fails(tmp_path, monkey
     monkeypatch.setattr(main, "Storage", FailingStorage)
 
     with caplog.at_level(logging.ERROR):
-        await main.run_account("acc1", cfg, asyncio.Event())
+        result = await main.run_account("acc1", cfg, asyncio.Event())
 
     assert any("acc1" in r.message and "crashed" in r.message for r in caplog.records)
+    assert result is False
 
 
 async def test_run_account_logs_when_cleanup_disconnect_fails(tmp_path, monkeypatch, caplog):
@@ -207,11 +214,14 @@ async def test_run_account_logs_when_cleanup_disconnect_fails(tmp_path, monkeypa
     monkeypatch.setattr(main.Storage, "close", tracking_close)
 
     with caplog.at_level(logging.ERROR):
-        await main.run_account("acc1", cfg, asyncio.Event())
+        result = await main.run_account("acc1", cfg, asyncio.Event())
 
     assert client.disconnect_calls == 1
     assert closed, "storage.close() must still run even though disconnect() raised"
     assert any("acc1" in r.message for r in caplog.records)
+    # The crash happens in cleanup (finally), after the polling loop already
+    # exited normally, so this still counts as a successful run.
+    assert result is True
 
 
 async def test_run_account_calls_backfill_after_register(tmp_path, monkeypatch):
@@ -239,15 +249,16 @@ async def test_run_account_calls_backfill_after_register(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
 
-    async def fake_backfill(_client, _logger, _cfg, _watch_ids):
+    async def fake_backfill(_client, _logger, _cfg, _watch_ids, _stop):
         call_order.append("backfill")
         return 0
 
     monkeypatch.setattr(main, "backfill", fake_backfill)
 
-    await main.run_account("test", cfg, asyncio.Event())
+    result = await main.run_account("test", cfg, asyncio.Event())
 
     assert call_order == ["register", "backfill"]
+    assert result is True
 
 
 async def test_load_watch_ids_migrates_env_list_into_empty_db(tmp_path, monkeypatch):
@@ -309,9 +320,56 @@ async def test_run_all_isolates_account_failures(tmp_path, monkeypatch, caplog):
             pass
 
     monkeypatch.setattr(main, "MessageLogger", RecordingLogger)
+    # run_all() installs real signal.signal handlers; without this they'd leak
+    # into the rest of the pytest session, referencing this test's dead stop
+    # Event. No test here exercises signal delivery, so a no-op is safe.
+    monkeypatch.setattr(main.signal, "signal", lambda *_a, **_kw: None)
 
     with caplog.at_level(logging.ERROR):
-        await main.run_all([("ok", ok_cfg), ("bad", bad_cfg)])
+        results = await main.run_all([("ok", ok_cfg), ("bad", bad_cfg)])
 
     assert ok_client.disconnect_calls == 1
     assert any("bad" in r.message and "crashed" in r.message for r in caplog.records)
+    assert results == [True, False]
+
+
+def test_main_exits_nonzero_when_all_accounts_fail(monkeypatch):
+    """A supervisor (systemd Restart=on-failure, a Docker healthcheck) needs a
+    non-zero exit code to know every account failed to start — run_account()
+    never raises, so main() must inspect run_all()'s results instead."""
+    monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object())])
+
+    async def fake_run_all(_accounts):
+        return [False]
+
+    monkeypatch.setattr(main, "run_all", fake_run_all)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.main()
+    assert exc_info.value.code == 1
+
+
+def test_main_exits_nonzero_when_all_accounts_raise_via_gather(monkeypatch):
+    """return_exceptions=True means a gather() result can be an exception
+    object rather than False — that must count as failure too, defensively."""
+    monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object())])
+
+    async def fake_run_all(_accounts):
+        return [RuntimeError("boom")]
+
+    monkeypatch.setattr(main, "run_all", fake_run_all)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.main()
+    assert exc_info.value.code == 1
+
+
+def test_main_does_not_exit_when_one_account_succeeds(monkeypatch):
+    monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object()), ("b", object())])
+
+    async def fake_run_all(_accounts):
+        return [False, True]
+
+    monkeypatch.setattr(main, "run_all", fake_run_all)
+
+    main.main()  # must not raise
