@@ -30,6 +30,10 @@ class Config:
     retention_days: int
     backfill_on_start: bool
     backfill_limit: int
+    log_level: str
+    log_file: Path | None
+    reconcile_interval_min: int
+    reconcile_window_hours: int
     proxy_enabled: bool
     proxy_type: str
     proxy_host: str
@@ -57,6 +61,7 @@ def parse_chat_list(raw: str) -> tuple[str, ...]:
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 def _as_bool(key: str, raw: str, default: bool) -> bool:
@@ -113,6 +118,26 @@ def load_config(env_path: str = ".env") -> Config:
     if not (1 <= proxy_port <= 65535):
         raise ConfigError(f"PROXY_PORT must be between 1 and 65535, got {proxy_port}")
 
+    log_level = (values.get("LOG_LEVEL") or "INFO").strip().upper()
+    if log_level not in _LOG_LEVELS:
+        raise ConfigError(
+            f"LOG_LEVEL must be one of {', '.join(sorted(_LOG_LEVELS))}, got {log_level!r}"
+        )
+
+    raw_log_file = (values.get("LOG_FILE") or "").strip()
+
+    reconcile_interval_min = _as_int(values, "RECONCILE_INTERVAL_MIN", 10)
+    if reconcile_interval_min < 0:
+        raise ConfigError(
+            f"RECONCILE_INTERVAL_MIN must be >= 0, got {reconcile_interval_min}"
+        )
+
+    reconcile_window_hours = _as_int(values, "RECONCILE_WINDOW_HOURS", 12)
+    if reconcile_window_hours < 1:
+        raise ConfigError(
+            f"RECONCILE_WINDOW_HOURS must be >= 1, got {reconcile_window_hours}"
+        )
+
     return Config(
         api_id=api_id,
         api_hash=api_hash,
@@ -133,6 +158,10 @@ def load_config(env_path: str = ".env") -> Config:
             "BACKFILL_ON_START", values.get("BACKFILL_ON_START") or "", True
         ),
         backfill_limit=backfill_limit,
+        log_level=log_level,
+        log_file=Path(raw_log_file) if raw_log_file else None,
+        reconcile_interval_min=reconcile_interval_min,
+        reconcile_window_hours=reconcile_window_hours,
         proxy_enabled=_as_bool("PROXY_ENABLED", values.get("PROXY_ENABLED") or "", False),
         proxy_type=(values.get("PROXY_TYPE") or "socks5").strip(),
         proxy_host=(values.get("PROXY_HOST") or "127.0.0.1").strip(),

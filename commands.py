@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 
 from telethon import events, utils
 
+import reports
 from config import Config
 from handlers import MessageLogger
 from storage import Storage
@@ -17,6 +18,10 @@ from storage import Storage
 log = logging.getLogger(__name__)
 
 _COMMAND_RE = re.compile(r"^/(watch|unwatch|list)\b\s*(.*)$", re.IGNORECASE)
+
+# Leaves headroom under Telegram's 4096-char message cap for the header line
+# and HTML markup around each entry.
+_LIST_CHUNK_LIMIT = reports.MAX_TEXT_LEN
 
 BackfillFn = Callable[[object, MessageLogger, Config, int], Awaitable[int]]
 
@@ -54,6 +59,11 @@ class CommandHandler:
         )
 
     async def on_command(self, event) -> None:
+        # LOG_TARGET need not be "me" — if it's ever a group or channel, every
+        # member could otherwise issue /watch, /unwatch, /list. Only messages
+        # sent by the account owner (out=True) may run a command.
+        if not getattr(event, "out", False):
+            return
         text = (getattr(event.message, "message", None) or "").strip()
         match = _COMMAND_RE.match(text)
         if not match:
@@ -125,13 +135,40 @@ class CommandHandler:
         if not rows:
             await self.logger.send_report("Слежу за всеми чатами (список пуст).")
             return
-        lines = ["<b>Отслеживаемые чаты:</b>"]
         account_tag = f" · {html.escape(self.account_label)}" if self.account_label else ""
+        entries = []
         for chat_id, label, _added_at in rows:
             title = label or self.logger.chat_title(chat_id) or str(chat_id)
             username = self.logger.chat_username(chat_id)
             display = f"{title} (@{username})" if username else title
-            lines.append(
+            entries.append(
                 f"— {html.escape(display)} (<code>{chat_id}</code>){account_tag}"
             )
-        await self.logger.send_report("\n".join(lines))
+        pages = self._paginate(entries)
+        for i, page in enumerate(pages, start=1):
+            header = "<b>Отслеживаемые чаты:</b>"
+            if len(pages) > 1:
+                header += f" ({i}/{len(pages)})"
+            await self.logger.send_report("\n".join([header, *page]))
+
+    @staticmethod
+    def _paginate(
+        entries: list[str], limit: int = _LIST_CHUNK_LIMIT
+    ) -> list[list[str]]:
+        """Group entries into pages that each stay under Telegram's message
+        limit — a long watch list would otherwise blow past 4096 chars and
+        send_report would silently drop the whole /list reply."""
+        pages: list[list[str]] = []
+        page: list[str] = []
+        page_len = 0
+        for entry in entries:
+            entry_len = len(entry) + 1  # + newline joining it to the page
+            if page and page_len + entry_len > limit:
+                pages.append(page)
+                page = []
+                page_len = 0
+            page.append(entry)
+            page_len += entry_len
+        if page:
+            pages.append(page)
+        return pages

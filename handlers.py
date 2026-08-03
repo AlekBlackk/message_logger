@@ -21,6 +21,13 @@ from storage import Storage, StoredMessage
 
 _SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
 
+# Telegram accepts at most 100 ids per messages.getMessages call.
+RECONCILE_CHUNK = 100
+RECONCILE_PAUSE_SEC = 1.0
+# A blind spot can hide hundreds of deletions; draining them all in one pass
+# would trip FloodWait on the log target. The rest waits for the next pass.
+RECONCILE_MAX_REPORTS = 30
+
 
 class MessageLogger:
     def __init__(
@@ -128,11 +135,13 @@ class MessageLogger:
         *,
         overwrite: bool = True,
     ) -> None:
+        if not overwrite and self.storage.find_message(peer_id, message.id) is not None:
+            return
         from_id = getattr(message, "from_id", None)
         sender_id = utils.get_peer_id(from_id) if from_id else None
         if sender_id is None:
             sender_id = getattr(message, "sender_id", None)
-        media_path, media_type = await self.capture_media(message, peer_id)
+        media_type = self._media_label(message) if message.media is not None else None
         row = StoredMessage(
             chat_id=peer_id,
             msg_id=message.id,
@@ -141,12 +150,20 @@ class MessageLogger:
             sender_id=sender_id,
             sender_name=self.sender_name(sender_id),
             text=message.message or None,
-            media_path=media_path,
+            media_path=None,
             media_type=media_type,
             date=int(message.date.timestamp()),
             deleted=False,
         )
+        # Row first, download second: updates are dispatched concurrently, so a
+        # message deleted while its media is still downloading would otherwise
+        # reach on_message_deleted before it is cached — and go unreported.
         self.storage.save_message(row, overwrite=overwrite)
+        if media_type is None:
+            return
+        media_path = await self.fetch_media(message, peer_id)
+        if media_path is not None:
+            self.storage.update_media_path(peer_id, message.id, media_path)
 
     @staticmethod
     def _media_label(message) -> str:
@@ -166,18 +183,15 @@ class MessageLogger:
                 return label
         return type(message.media).__name__
 
-    async def capture_media(self, message, peer_id: int) -> tuple[str | None, str | None]:
+    async def fetch_media(self, message, peer_id: int) -> str | None:
         """Download media now — after deletion the file reference is dead."""
-        if message.media is None:
-            return None, None
-        media_type = self._media_label(message)
         file = getattr(message, "file", None)
         if not self.config.download_media or file is None:
-            return None, media_type
+            return None
         size = getattr(file, "size", None) or 0
         if size > self.config.max_media_bytes:
             self.log.info("media %s bytes over limit, skipping download", size)
-            return None, media_type
+            return None
         ext = getattr(file, "ext", None) or ".bin"
         if not _SAFE_EXT_RE.match(ext):
             ext = ".bin"
@@ -188,8 +202,8 @@ class MessageLogger:
             await self.client.download_media(message, file=str(target))
         except Exception:
             self.log.exception("failed to download media for message %s", message.id)
-            return None, media_type
-        return str(target), media_type
+            return None
+        return str(target)
 
     # --- sending ----------------------------------------------------------
 
@@ -305,6 +319,40 @@ class MessageLogger:
         except Exception:
             self.log.exception("on_message_edited failed")
 
+    async def report_deleted(self, stored: StoredMessage, *, source: str) -> bool:
+        """Send one deletion report. The row is marked deleted only once the
+        report is out, so a failed send is retried by the next reconcile pass
+        instead of being silently swallowed."""
+        sent = await self.send_report(
+            reports.format_deleted(
+                stored,
+                self.chat_username(stored.chat_id),
+                self.sender_username(stored.sender_id),
+            ),
+            media_path=stored.media_path,
+        )
+        preview = reports.truncate(stored.text, 80) or (
+            f"[{stored.media_type}]" if stored.media_type else ""
+        )
+        if sent:
+            self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+            self.log.info(
+                "deletion reported (%s): chat [%s] msg %s: %r",
+                source,
+                self.chat_label(stored.chat_id),
+                stored.msg_id,
+                preview,
+            )
+        else:
+            self.log.warning(
+                "deletion NOT reported (send failed, %s): chat [%s] msg %s: %r",
+                source,
+                self.chat_label(stored.chat_id),
+                stored.msg_id,
+                preview,
+            )
+        return sent
+
     async def on_message_deleted(self, event) -> None:
         chat_id = event.chat_id  # only channels and supergroups fill this in
         if chat_id is not None and not self.is_tracked(chat_id):
@@ -313,37 +361,79 @@ class MessageLogger:
             try:
                 stored = self.storage.find_message(chat_id, msg_id)
                 if stored is None:
-                    self.log.debug("deleted message %s not in cache", msg_id)
+                    if chat_id is None:
+                        # No chat id means DMs and basic groups share one id
+                        # space, so most of these belong to untracked chats.
+                        self.log.debug("deleted message %s not in cache", msg_id)
+                    else:
+                        self.log.warning(
+                            "deleted message not in cache: chat [%s] msg %s",
+                            self.chat_label(chat_id),
+                            msg_id,
+                        )
                     continue
                 if stored.deleted:
                     continue  # duplicate update for the same deletion
                 if not self.is_tracked(stored.chat_id):
                     continue
-                self.storage.mark_deleted(stored.chat_id, stored.msg_id)
-                sent = await self.send_report(
-                    reports.format_deleted(
-                        stored,
-                        self.chat_username(stored.chat_id),
-                        self.sender_username(stored.sender_id),
-                    ),
-                    media_path=stored.media_path,
-                )
-                preview = reports.truncate(stored.text, 80) or (
-                    f"[{stored.media_type}]" if stored.media_type else ""
-                )
-                if sent:
-                    self.log.info(
-                        "deletion reported: chat [%s] msg %s: %r",
-                        self.chat_label(stored.chat_id),
-                        stored.msg_id,
-                        preview,
-                    )
-                else:
-                    self.log.warning(
-                        "deletion NOT reported (send failed): chat [%s] msg %s: %r",
-                        self.chat_label(stored.chat_id),
-                        stored.msg_id,
-                        preview,
-                    )
+                await self.report_deleted(stored, source="live")
             except Exception:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
+
+    # --- reconciliation ---------------------------------------------------
+
+    async def reconcile(self, since_ts: int) -> int:
+        """Report deletions the update stream never delivered.
+
+        Deletion updates are not guaranteed: they are lost across a
+        reconnect gap, and auto-delete (TTL) expiry is not always pushed to
+        clients at all. Asking Telegram which cached ids still exist is the
+        only way to notice — the cache is the sole record that they existed.
+        """
+        if self.watch_ids:
+            chat_ids = sorted(self.watch_ids)
+        else:
+            chat_ids = self.storage.recent_chats(since_ts)
+        total = 0
+        for chat_id in chat_ids:
+            if not self.is_tracked(chat_id):
+                continue
+            if total >= RECONCILE_MAX_REPORTS:
+                self.log.warning(
+                    "reconcile: report budget spent, remaining deletions wait "
+                    "for the next pass"
+                )
+                break
+            total += await self.reconcile_chat(
+                chat_id, since_ts, RECONCILE_MAX_REPORTS - total
+            )
+        return total
+
+    async def reconcile_chat(self, chat_id: int, since_ts: int, budget: int) -> int:
+        reported = 0
+        ids = self.storage.alive_ids(chat_id, since_ts)
+        for start in range(0, len(ids), RECONCILE_CHUNK):
+            if reported >= budget:
+                break
+            chunk = ids[start : start + RECONCILE_CHUNK]
+            try:
+                fetched = await self.client.get_messages(chat_id, ids=chunk)
+            except Exception:
+                self.log.exception(
+                    "reconcile: cannot fetch messages for chat [%s]",
+                    self.chat_label(chat_id),
+                )
+                break
+            for msg_id, message in zip(chunk, fetched):
+                if message is not None:
+                    continue  # still there
+                if reported >= budget:
+                    break
+                stored = self.storage.find_message(chat_id, msg_id)
+                if stored is None or stored.deleted:
+                    continue
+                if await self.report_deleted(stored, source="reconcile"):
+                    reported += 1
+                await asyncio.sleep(RECONCILE_PAUSE_SEC)
+            await asyncio.sleep(RECONCILE_PAUSE_SEC)
+        return reported

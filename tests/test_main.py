@@ -338,6 +338,7 @@ def test_main_exits_nonzero_when_all_accounts_fail(monkeypatch):
     non-zero exit code to know every account failed to start — run_account()
     never raises, so main() must inspect run_all()'s results instead."""
     monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object())])
+    monkeypatch.setattr(main, "setup_logging", lambda _cfg: None)
 
     async def fake_run_all(_accounts):
         return [False]
@@ -353,6 +354,7 @@ def test_main_exits_nonzero_when_all_accounts_raise_via_gather(monkeypatch):
     """return_exceptions=True means a gather() result can be an exception
     object rather than False — that must count as failure too, defensively."""
     monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object())])
+    monkeypatch.setattr(main, "setup_logging", lambda _cfg: None)
 
     async def fake_run_all(_accounts):
         return [RuntimeError("boom")]
@@ -366,6 +368,7 @@ def test_main_exits_nonzero_when_all_accounts_raise_via_gather(monkeypatch):
 
 def test_main_does_not_exit_when_one_account_succeeds(monkeypatch):
     monkeypatch.setattr(main, "load_account_configs", lambda: [("a", object()), ("b", object())])
+    monkeypatch.setattr(main, "setup_logging", lambda _cfg: None)
 
     async def fake_run_all(_accounts):
         return [False, True]

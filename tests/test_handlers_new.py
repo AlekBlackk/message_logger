@@ -28,6 +28,9 @@ class FakeClient:
             fh.write(b"data")
         return file
 
+    async def get_messages(self, _entity, ids=None):
+        return [None for _ in (ids or [])]
+
     def add_event_handler(self, *_a, **_kw):
         pass
 
@@ -49,6 +52,10 @@ def make_config(tmp_path, **kw):
         retention_days=14,
         backfill_on_start=False,
         backfill_limit=10,
+        log_level="INFO",
+        log_file=None,
+        reconcile_interval_min=0,
+        reconcile_window_hours=12,
         proxy_enabled=False,
         proxy_type="socks5",
         proxy_host="127.0.0.1",
@@ -192,6 +199,45 @@ async def test_media_downloaded_within_limit(tmp_path):
     stored = db.find_message(-1001, 5)
     assert stored.media_path is not None
     assert stored.media_path.endswith(".jpg")
+    assert len(client.downloads) == 1
+    db.close()
+
+
+async def test_row_is_cached_before_media_download(tmp_path):
+    """Updates are dispatched concurrently: a deletion arriving while the media
+    is still downloading must already find the message in the cache."""
+    logger, client, db = make_logger(tmp_path)
+    seen = {}
+
+    async def watching_download(_message, file=None):
+        seen["cached"] = db.find_message(-1001, 5) is not None
+        with open(file, "wb") as fh:
+            fh.write(b"data")
+        return file
+
+    client.download_media = watching_download
+    file = types.SimpleNamespace(size=1024, ext=".jpg", mime_type="image/jpeg")
+    await logger.on_new_message(fake_event(media=object(), file=file))
+
+    assert seen["cached"] is True
+    assert db.find_message(-1001, 5).media_path.endswith(".jpg")
+    db.close()
+
+
+async def test_backfill_does_not_redownload_cached_message(tmp_path):
+    """overwrite=False means the row is already final — re-fetching its media
+    would burn rate limit for a file that is on disk already."""
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".jpg", mime_type="image/jpeg")
+    event = fake_event(media=object(), file=file)
+
+    await logger.store_message(
+        event.message, peer_id=-1001, is_channel=True, chat_title="c", overwrite=False
+    )
+    await logger.store_message(
+        event.message, peer_id=-1001, is_channel=True, chat_title="c", overwrite=False
+    )
+
     assert len(client.downloads) == 1
     db.close()
 

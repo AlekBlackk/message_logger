@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from config import Config, ConfigError, load_account_configs, load_config, parse_chat_list
@@ -156,6 +158,51 @@ def test_log_edits_typo_raises(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(env)
     assert "LOG_EDITS" in str(exc.value)
+
+
+def test_logging_and_reconcile_defaults(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\n")
+    cfg = load_config(env)
+    assert cfg.log_level == "INFO"
+    assert cfg.log_file is None
+    assert cfg.reconcile_interval_min == 10
+    assert cfg.reconcile_window_hours == 12
+
+
+def test_log_level_is_normalised(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_LEVEL=debug\n")
+    assert load_config(env).log_level == "DEBUG"
+
+
+def test_unknown_log_level_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_LEVEL=verbose\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "LOG_LEVEL" in str(exc.value)
+
+
+def test_log_file_becomes_a_path(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_FILE=logs/bot.log\n")
+    assert load_config(env).log_file == Path("logs/bot.log")
+
+
+def test_reconcile_interval_zero_disables(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nRECONCILE_INTERVAL_MIN=0\n")
+    assert load_config(env).reconcile_interval_min == 0
+
+
+def test_negative_reconcile_interval_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nRECONCILE_INTERVAL_MIN=-1\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "RECONCILE_INTERVAL_MIN" in str(exc.value)
+
+
+def test_reconcile_window_zero_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nRECONCILE_WINDOW_HOURS=0\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "RECONCILE_WINDOW_HOURS" in str(exc.value)
 
 
 def test_load_account_configs_falls_back_to_single_account(tmp_path, monkeypatch):

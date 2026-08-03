@@ -59,8 +59,9 @@ class FakeMessage:
 
 
 class FakeEvent:
-    def __init__(self, text, reply=None):
+    def __init__(self, text, reply=None, out=True):
         self.message = FakeMessage(text, reply)
+        self.out = out
 
 
 def make_handler(tmp_path, *, entities=None, watch=None, account_label=""):
@@ -185,6 +186,33 @@ async def test_list_omits_tag_without_account_label(tmp_path):
     db.add_watch(-1001, "Chat A", 1000)
     await handler.on_command(FakeEvent("/list"))
     assert "·" not in client.sent[-1][1]
+    db.close()
+
+
+async def test_incoming_command_from_other_sender_ignored(tmp_path):
+    """A /watch sent by someone else in the log target (out=False) must not
+    run — otherwise anyone in a non-"me" LOG_TARGET could control the bot."""
+    handler, client, db, calls = make_handler(
+        tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
+    )
+    await handler.on_command(FakeEvent("/watch @a", out=False))
+    assert db.list_watch() == []
+    assert calls == []
+    assert client.sent == []
+    db.close()
+
+
+async def test_list_paginates_when_over_message_limit(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    for i in range(400):
+        db.add_watch(-1000 - i, f"Chat {i} " + "x" * 40, 1000 + i)
+    await handler.on_command(FakeEvent("/list"))
+    assert len(client.sent) > 1
+    for target, text, _kw in client.sent:
+        assert len(text) <= 3600
+        assert target == 777
+    assert "Chat 0 " in client.sent[0][1]
+    assert "Chat 399 " in client.sent[-1][1]
     db.close()
 
 

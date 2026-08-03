@@ -7,6 +7,7 @@ import logging
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from telethon import TelegramClient, utils
@@ -22,11 +23,22 @@ log = logging.getLogger("message_log")
 RETENTION_INTERVAL_SEC = 3600
 
 
-def setup_logging() -> None:
+def setup_logging(cfg: Config) -> None:
+    """Logging is process-wide, so with several accounts the first one's
+    LOG_LEVEL/LOG_FILE wins — per-account log files would need separate
+    handlers per logger, which nothing here asks for."""
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if cfg.log_file is not None:
+        cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(
+                cfg.log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+            )
+        )
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, cfg.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        stream=sys.stdout,
+        handlers=handlers,
     )
     logging.getLogger("telethon").setLevel(logging.WARNING)
 
@@ -72,11 +84,14 @@ async def load_watch_ids(client, storage: Storage, cfg: Config) -> set[int]:
 
 
 def build_client(cfg: Config) -> TelegramClient:
+    # catch_up=True makes Telethon fetch the updates missed while the process
+    # was down; without it every deletion during a restart is lost for good.
     return TelegramClient(
         cfg.session_name,
         cfg.api_id,
         cfg.api_hash,
         proxy=cfg.proxy_dict(),
+        catch_up=True,
     )
 
 
@@ -95,6 +110,27 @@ async def retention_loop(cfg: Config, storage: Storage) -> None:
         except Exception:
             log.exception("retention pass failed")
         await asyncio.sleep(RETENTION_INTERVAL_SEC)
+
+
+# The live update stream is the fast path; the first sweep waits so it does not
+# compete with backfill and startup traffic for the same rate limit.
+RECONCILE_STARTUP_DELAY_SEC = 60
+
+
+async def reconcile_loop(cfg: Config, logger: MessageLogger) -> None:
+    await asyncio.sleep(RECONCILE_STARTUP_DELAY_SEC)
+    while True:
+        try:
+            since = int(time.time()) - cfg.reconcile_window_hours * 3600
+            reported = await logger.reconcile(since)
+            if reported:
+                logger.log.info(
+                    "reconcile: reported %s deletion(s) the update stream missed",
+                    reported,
+                )
+        except Exception:
+            logger.log.exception("reconcile pass failed")
+        await asyncio.sleep(cfg.reconcile_interval_min * 60)
 
 
 BACKFILL_PAUSE_SEC = 1
@@ -186,7 +222,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
         acc_log.exception("account %s crashed", label)
         return False
     client = None
-    retention_task: asyncio.Task | None = None
+    background: list[asyncio.Task] = []
     ok = False
     try:
         client = build_client(cfg)
@@ -228,7 +264,9 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
 
         await backfill(client, logger, cfg, watch_ids, stop)
 
-        retention_task = asyncio.create_task(retention_loop(cfg, storage))
+        background.append(asyncio.create_task(retention_loop(cfg, storage)))
+        if cfg.reconcile_interval_min > 0:
+            background.append(asyncio.create_task(reconcile_loop(cfg, logger)))
         # Poll rather than awaiting a single future: on Windows the loop must
         # wake up regularly for a Ctrl+C signal handler to run at all.
         # client.disconnected (not is_connected()) is the exit signal — it
@@ -243,14 +281,14 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
         # Each cleanup step is guarded independently so a failure in one
         # (e.g. a hung disconnect) can't skip the ones after it — and none of
         # them may let an exception escape run_account itself.
-        if retention_task is not None:
-            retention_task.cancel()
+        for task in background:
+            task.cancel()
             try:
-                await retention_task
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception:
-                acc_log.exception("account %s: retention task cleanup crashed", label)
+                acc_log.exception("account %s: background task cleanup crashed", label)
         if client is not None:
             try:
                 await client.disconnect()
@@ -284,12 +322,12 @@ async def run_all(accounts: list[tuple[str, Config]]) -> list:
 
 
 def main() -> None:
-    setup_logging()
     try:
         accounts = load_account_configs()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(1)
+    setup_logging(accounts[0][1])
     results = asyncio.run(run_all(accounts))
     if not any(result is True for result in results):
         log.error("all accounts failed to start; exiting with non-zero status")

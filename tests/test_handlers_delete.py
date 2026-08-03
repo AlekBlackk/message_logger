@@ -177,6 +177,36 @@ async def test_failed_send_is_not_logged_as_reported(tmp_path, caplog):
     db.close()
 
 
+async def test_failed_send_leaves_row_undeleted_for_retry(tmp_path):
+    """Marking the row deleted before the report is out would hide it from the
+    reconcile sweep, making a failed send a permanent loss."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=5, is_channel=True)
+
+    async def failing_send_message(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    client.send_message = failing_send_message
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    assert db.find_message(-1001, 5).deleted is False
+    db.close()
+
+
+async def test_uncached_deletion_in_known_chat_warns(tmp_path, caplog):
+    """A cache miss in a chat we do track is the symptom of a caching hole —
+    at DEBUG it never reaches the log and the hole stays invisible."""
+    import logging
+
+    logger, _client, db = make_logger(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="handlers"):
+        await logger.on_message_deleted(delete_event([123], chat_id=-1001))
+    assert any(
+        "not in cache" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+    db.close()
+
+
 async def test_batch_with_missing_and_present(tmp_path):
     """One id in the batch was never cached; the other was — the cached one
     must still be reported."""

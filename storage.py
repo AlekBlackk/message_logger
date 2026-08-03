@@ -124,6 +124,31 @@ class Storage:
         )
         self.conn.commit()
 
+    def update_media_path(self, chat_id: int, msg_id: int, media_path: str) -> None:
+        self.conn.execute(
+            "UPDATE messages SET media_path = ? WHERE chat_id = ? AND msg_id = ?",
+            (media_path, chat_id, msg_id),
+        )
+        self.conn.commit()
+
+    def alive_ids(self, chat_id: int, since_ts: int) -> list[int]:
+        """Ids this chat is still believed to hold, for reconciliation against
+        Telegram — anything missing there was deleted without an update."""
+        rows = self.conn.execute(
+            "SELECT msg_id FROM messages "
+            "WHERE chat_id = ? AND deleted = 0 AND date >= ? ORDER BY msg_id ASC",
+            (chat_id, since_ts),
+        ).fetchall()
+        return [r["msg_id"] for r in rows]
+
+    def recent_chats(self, since_ts: int) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT chat_id FROM messages WHERE deleted = 0 AND date >= ? "
+            "GROUP BY chat_id ORDER BY MAX(date) DESC",
+            (since_ts,),
+        ).fetchall()
+        return [r["chat_id"] for r in rows]
+
     def update_text(self, chat_id: int, msg_id: int, new_text: str | None) -> None:
         self.conn.execute(
             "UPDATE messages SET text = ? WHERE chat_id = ? AND msg_id = ?",
