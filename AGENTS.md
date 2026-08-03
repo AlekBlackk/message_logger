@@ -12,7 +12,7 @@ Telegram-юзербот на Telethon (MTProto). Кеширует входящи
 
 | Файл | Ответственность |
 | --- | --- |
-| `main.py` | Точка входа: сборка клиента, регистрация хендлеров, backfill, цикл ретеншена, graceful shutdown. |
+| `main.py` | Точка входа: `run_all()` поднимает `run_account()` для каждого аккаунта из `load_account_configs()` через `asyncio.gather` — сборка клиента, регистрация хендлеров, backfill, цикл ретеншена, graceful shutdown на аккаунт, падение одного не валит остальные. |
 | `config.py` | `Config` (frozen dataclass), `load_config()`, парсинг и валидация `.env`. |
 | `storage.py` | SQLite-слой: схема (`messages`, `edits`), `StoredMessage`, вставка/чтение/очистка. |
 | `handlers.py` | `MessageLogger`: обработчики `NewMessage`, `MessageDeleted`, `MessageEdited`, кеш имён. |
