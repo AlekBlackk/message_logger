@@ -125,6 +125,8 @@ class CommandHandler:
             return
         lines = ["<b>Отслеживаемые чаты:</b>"]
         for chat_id, label, _added_at in rows:
-            display = label or self.logger.chat_label(chat_id)
+            title = label or self.logger.chat_title(chat_id) or str(chat_id)
+            username = self.logger.chat_username(chat_id)
+            display = f"{title} (@{username})" if username else title
             lines.append(f"— {html.escape(display)} (<code>{chat_id}</code>)")
         await self.logger.send_report("\n".join(lines))
