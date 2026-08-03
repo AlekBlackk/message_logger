@@ -170,9 +170,13 @@ def test_load_account_configs_falls_back_to_single_account(tmp_path, monkeypatch
 
 def test_load_account_configs_reads_multiple_files(tmp_path, monkeypatch):
     env1 = tmp_path / "acc1.env"
-    env1.write_text("API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\n", encoding="utf-8")
+    env1.write_text(
+        "API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\nDB_PATH=one.db\n", encoding="utf-8"
+    )
     env2 = tmp_path / "acc2.env"
-    env2.write_text("API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\n", encoding="utf-8")
+    env2.write_text(
+        "API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\nDB_PATH=two.db\n", encoding="utf-8"
+    )
     monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
     accounts = load_account_configs()
     assert [label for label, _cfg in accounts] == ["acc1", "acc2"]
@@ -195,3 +199,86 @@ def test_load_account_configs_propagates_config_error(tmp_path, monkeypatch):
     monkeypatch.setenv("ACCOUNTS_ENV", str(bad))
     with pytest.raises(ConfigError):
         load_account_configs()
+
+
+def test_load_account_configs_missing_file_raises(tmp_path, monkeypatch):
+    """A typo'd path in ACCOUNTS_ENV must not fall through to dotenv_values()
+    returning nothing and load_config() silently building a config purely
+    from OS environment variables (a silent clone of another account)."""
+    env1 = tmp_path / "acc1.env"
+    env1.write_text("API_ID=1\nAPI_HASH=h1\n", encoding="utf-8")
+    missing = tmp_path / "typo.env"
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{missing}")
+    with pytest.raises(ConfigError) as exc:
+        load_account_configs()
+    assert str(missing) in str(exc.value)
+    assert "не найден" in str(exc.value)
+
+
+def test_load_account_configs_rejects_duplicate_label(tmp_path, monkeypatch):
+    """Two files with the same stem produce the same label — used for
+    per-account logging — so this must be rejected too."""
+    dir1 = tmp_path / "d1"
+    dir2 = tmp_path / "d2"
+    dir1.mkdir()
+    dir2.mkdir()
+    env1 = dir1 / "acc.env"
+    env1.write_text("API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\nDB_PATH=one.db\n",
+                     encoding="utf-8")
+    env2 = dir2 / "acc.env"
+    env2.write_text("API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\nDB_PATH=two.db\n",
+                     encoding="utf-8")
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
+    with pytest.raises(ConfigError) as exc:
+        load_account_configs()
+    assert "label" in str(exc.value)
+
+
+def test_load_account_configs_rejects_duplicate_session_name(tmp_path, monkeypatch):
+    """Two accounts sharing a session_name would collapse into one shared
+    Telethon session with zero warning — this must be caught up front."""
+    env1 = tmp_path / "acc1.env"
+    env1.write_text(
+        "API_ID=1\nAPI_HASH=h1\nSESSION_NAME=shared\nDB_PATH=one.db\n", encoding="utf-8"
+    )
+    env2 = tmp_path / "acc2.env"
+    env2.write_text(
+        "API_ID=2\nAPI_HASH=h2\nSESSION_NAME=shared\nDB_PATH=two.db\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
+    with pytest.raises(ConfigError) as exc:
+        load_account_configs()
+    assert "session_name" in str(exc.value)
+
+
+def test_load_account_configs_rejects_duplicate_db_path(tmp_path, monkeypatch):
+    """Two accounts sharing a db_path would collapse into one shared SQLite DB
+    (including a shared watch_chats table) with zero warning."""
+    env1 = tmp_path / "acc1.env"
+    env1.write_text(
+        "API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\nDB_PATH=shared.db\n", encoding="utf-8"
+    )
+    env2 = tmp_path / "acc2.env"
+    env2.write_text(
+        "API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\nDB_PATH=shared.db\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
+    with pytest.raises(ConfigError) as exc:
+        load_account_configs()
+    assert "db_path" in str(exc.value)
+
+
+def test_load_account_configs_allows_distinct_accounts(tmp_path, monkeypatch):
+    """Sanity check: accounts with distinct label/session_name/db_path must
+    load fine — the collision guard must not be over-eager."""
+    env1 = tmp_path / "acc1.env"
+    env1.write_text(
+        "API_ID=1\nAPI_HASH=h1\nSESSION_NAME=one\nDB_PATH=one.db\n", encoding="utf-8"
+    )
+    env2 = tmp_path / "acc2.env"
+    env2.write_text(
+        "API_ID=2\nAPI_HASH=h2\nSESSION_NAME=two\nDB_PATH=two.db\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ACCOUNTS_ENV", f"{env1},{env2}")
+    accounts = load_account_configs()
+    assert [label for label, _cfg in accounts] == ["acc1", "acc2"]

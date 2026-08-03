@@ -155,4 +155,27 @@ def load_account_configs(default_env_path: str = ".env") -> list[tuple[str, Conf
     if not paths:
         cfg = load_config(default_env_path)
         return [(cfg.session_name, cfg)]
-    return [(Path(p).stem, load_config(p)) for p in paths]
+
+    accounts: list[tuple[str, Config]] = []
+    for p in paths:
+        if not Path(p).is_file():
+            raise ConfigError(f"{p}: файл не найден")
+        accounts.append((Path(p).stem, load_config(p)))
+
+    _check_no_collisions(paths, accounts)
+    return accounts
+
+
+def _check_no_collisions(paths: list[str], accounts: list[tuple[str, Config]]) -> None:
+    """Two .env files that don't each set a distinct SESSION_NAME/DB_PATH would
+    otherwise collapse into one shared Telethon session and/or one shared
+    SQLite DB (including a shared watch_chats table) with zero warning."""
+    for field in ("label", "session_name", "db_path"):
+        seen: dict[object, str] = {}
+        for path, (label, cfg) in zip(paths, accounts):
+            value = label if field == "label" else getattr(cfg, field)
+            if value in seen:
+                raise ConfigError(
+                    f"accounts {seen[value]} and {path} both use {field} {value}"
+                )
+            seen[value] = path
