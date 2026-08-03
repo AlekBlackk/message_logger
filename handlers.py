@@ -44,6 +44,7 @@ class MessageLogger:
         self._names: dict[int, str] = {}
         self._titles: dict[int, str] = {}
         self._usernames: dict[int, str] = {}
+        self._sender_usernames: dict[int, str] = {}
 
     # --- wiring -----------------------------------------------------------
 
@@ -67,9 +68,13 @@ class MessageLogger:
         """Fill the in-memory caches from entities Telethon ships with the update."""
         sender = getattr(event, "sender", None)
         if sender is not None and getattr(sender, "id", None) is not None:
+            sender_peer_id = utils.get_peer_id(sender)
             name = utils.get_display_name(sender)
             if name:
-                self._names[utils.get_peer_id(sender)] = name
+                self._names[sender_peer_id] = name
+            sender_username = getattr(sender, "username", None)
+            if sender_username:
+                self._sender_usernames[sender_peer_id] = sender_username
         chat = getattr(event, "chat", None)
         chat_id = getattr(event, "chat_id", None)
         if chat is not None and chat_id is not None:
@@ -90,6 +95,11 @@ class MessageLogger:
 
     def chat_username(self, chat_id: int) -> str | None:
         return self._usernames.get(chat_id)
+
+    def sender_username(self, sender_id: int | None) -> str | None:
+        if sender_id is None:
+            return None
+        return self._sender_usernames.get(sender_id)
 
     def chat_label(self, chat_id: int) -> str:
         """Display title plus @username when known, falling back to the raw id."""
@@ -285,7 +295,11 @@ class MessageLogger:
             if self.config.log_edits:
                 await self.send_report(
                     reports.format_edited(
-                        previous, previous.text, new_text, self.chat_username(peer_id)
+                        previous,
+                        previous.text,
+                        new_text,
+                        self.chat_username(peer_id),
+                        self.sender_username(previous.sender_id),
                     )
                 )
         except Exception:
@@ -307,7 +321,11 @@ class MessageLogger:
                     continue
                 self.storage.mark_deleted(stored.chat_id, stored.msg_id)
                 sent = await self.send_report(
-                    reports.format_deleted(stored, self.chat_username(stored.chat_id)),
+                    reports.format_deleted(
+                        stored,
+                        self.chat_username(stored.chat_id),
+                        self.sender_username(stored.sender_id),
+                    ),
                     media_path=stored.media_path,
                 )
                 preview = reports.truncate(stored.text, 80) or (
