@@ -343,6 +343,40 @@ async def test_purge_by_negative_numeric_id_resolves_as_chat(tmp_path):
     db.close()
 
 
+async def test_purge_confirm_deletes_media_file_from_disk(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    media_file = media_dir / "1.jpg"
+    media_file.write_bytes(b"fake-image-bytes")
+    db.save_message(
+        make_msg(chat_id=-1001, msg_id=1, date=100, media_path=str(media_file))
+    )
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert not media_file.exists()
+    assert "1" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_incoming_command_from_other_sender_ignored(tmp_path):
+    """A /purge sent by someone else in the log target (out=False) must not
+    run — a bypass here would mean irreversible data loss."""
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    await handler.on_command(FakeEvent("/purge 1 confirm", out=False))
+    assert db.find_message(-1001, 1) is not None
+    assert client.sent == []
+    db.close()
+
+
+async def test_purge_huge_days_rejects_without_raising(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/purge 99999999999999999999 confirm"))
+    assert "⚠️" in client.sent[-1][1]
+    db.close()
+
+
 async def test_help_lists_all_commands(tmp_path):
     handler, client, db, _calls = make_handler(tmp_path)
     await handler.on_command(FakeEvent("/help"))

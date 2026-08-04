@@ -1,4 +1,4 @@
-"""Runtime watch-list commands: /watch, /unwatch, /list sent to the log target."""
+"""Runtime commands sent to the log target: /watch, /unwatch, /list, /purge, /help."""
 
 from __future__ import annotations
 
@@ -23,6 +23,11 @@ _COMMAND_RE = re.compile(r"^/(watch|unwatch|list|purge|help)\b\s*(.*)$", re.IGNO
 # Leaves headroom under Telegram's 4096-char message cap for the header line
 # and HTML markup around each entry.
 _LIST_CHUNK_LIMIT = reports.MAX_TEXT_LEN
+
+# 100 years — far more than any real retention need, but small enough that
+# cutoff_ts = now - days * 86400 stays well inside SQLite's INTEGER range and
+# never raises OverflowError.
+_PURGE_MAX_DAYS = 36500
 
 _PURGE_USAGE = (
     "<b>/purge</b> — очистка сообщений из БД.\n"
@@ -81,8 +86,10 @@ class CommandHandler:
 
     async def on_command(self, event) -> None:
         # LOG_TARGET need not be "me" — if it's ever a group or channel, every
-        # member could otherwise issue /watch, /unwatch, /list. Only messages
-        # sent by the account owner (out=True) may run a command.
+        # member could otherwise issue /watch, /unwatch, /list, /purge. Only
+        # messages sent by the account owner (out=True) may run a command —
+        # this matters most for /purge, where a bypass means irreversible
+        # data loss.
         if not getattr(event, "out", False):
             return
         text = (getattr(event.message, "message", None) or "").strip()
@@ -188,6 +195,11 @@ class CommandHandler:
         if days is not None and days < 1:
             await self.logger.send_report(
                 "⚠️ /purge: число дней должно быть >= 1"
+            )
+            return
+        if days is not None and days > _PURGE_MAX_DAYS:
+            await self.logger.send_report(
+                f"⚠️ /purge: число дней должно быть <= {_PURGE_MAX_DAYS}"
             )
             return
 
