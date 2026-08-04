@@ -242,8 +242,14 @@ async def test_purge_no_args_shows_usage(tmp_path):
 
 
 async def test_purge_by_days_dry_run_reports_count(tmp_path):
+    """The `<days>` arg is a real wall-clock cutoff (now - N days), so this
+    needs a date relative to time.time() — /purge <N> targets the last N
+    days, not rows older than N days."""
     handler, client, db, _calls = make_handler(tmp_path)
-    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100, media_path="media/1.jpg"))
+    now = int(time.time())
+    db.save_message(
+        make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400, media_path="media/1.jpg")
+    )
     await handler.on_command(FakeEvent("/purge 30"))
     assert db.find_message(-1001, 1) is not None
     assert "1" in client.sent[-1][1]
@@ -253,7 +259,8 @@ async def test_purge_by_days_dry_run_reports_count(tmp_path):
 
 async def test_purge_by_days_confirm_deletes(tmp_path):
     handler, client, db, _calls = make_handler(tmp_path)
-    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    now = int(time.time())
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400))
     await handler.on_command(FakeEvent("/purge 30 confirm"))
     assert db.find_message(-1001, 1) is None
     assert "✅" in client.sent[-1][1]
@@ -288,7 +295,8 @@ async def test_purge_by_chat_confirm_deletes_only_that_chat(tmp_path):
 async def test_purge_by_chat_and_days(tmp_path):
     """The `<days>` arg is converted to a real wall-clock cutoff (now - N days),
     so this needs dates relative to time.time() — a small fixed date like 100
-    would always be "older" regardless of N and wouldn't exercise the filter."""
+    would always be within range regardless of N and wouldn't exercise the
+    filter. /purge <chat> <N> targets the last N days in that chat."""
     handler, client, db, _calls = make_handler(
         tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
     )
@@ -296,8 +304,8 @@ async def test_purge_by_chat_and_days(tmp_path):
     db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 10 * 86400))
     db.save_message(make_msg(chat_id=-1001, msg_id=2, date=now - 1 * 86400))
     await handler.on_command(FakeEvent("/purge @a 3 confirm"))
-    assert db.find_message(-1001, 1) is None
-    assert db.find_message(-1001, 2) is not None
+    assert db.find_message(-1001, 1) is not None
+    assert db.find_message(-1001, 2) is None
     db.close()
 
 
@@ -349,8 +357,11 @@ async def test_purge_confirm_deletes_media_file_from_disk(tmp_path):
     media_dir.mkdir()
     media_file = media_dir / "1.jpg"
     media_file.write_bytes(b"fake-image-bytes")
+    now = int(time.time())
     db.save_message(
-        make_msg(chat_id=-1001, msg_id=1, date=100, media_path=str(media_file))
+        make_msg(
+            chat_id=-1001, msg_id=1, date=now - 1 * 86400, media_path=str(media_file)
+        )
     )
     await handler.on_command(FakeEvent("/purge 30 confirm"))
     assert db.find_message(-1001, 1) is None
@@ -368,8 +379,11 @@ async def test_purge_confirm_missing_media_file_not_counted_as_removed(tmp_path)
     media_dir = tmp_path / "media"
     media_dir.mkdir()
     ghost_path = media_dir / "gone.jpg"  # never created
+    now = int(time.time())
     db.save_message(
-        make_msg(chat_id=-1001, msg_id=1, date=100, media_path=str(ghost_path))
+        make_msg(
+            chat_id=-1001, msg_id=1, date=now - 1 * 86400, media_path=str(ghost_path)
+        )
     )
     await handler.on_command(FakeEvent("/purge 30 confirm"))
     assert db.find_message(-1001, 1) is None

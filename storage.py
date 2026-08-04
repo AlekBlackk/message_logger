@@ -219,12 +219,14 @@ class Storage:
         self, cutoff_ts: int | None, chat_id: int | None
     ) -> tuple[str, list[int]]:
         """Build the WHERE conditions shared by count_purge_candidates and purge.
+        cutoff_ts is a lower bound — /purge <N> targets rows from the last N
+        days (date >= cutoff), not rows older than it.
         Requiring at least one filter keeps a bare (None, None) call from ever
         matching the whole table."""
         conditions = []
         params: list[int] = []
         if cutoff_ts is not None:
-            conditions.append("date < ?")
+            conditions.append("date >= ?")
             params.append(cutoff_ts)
         if chat_id is not None:
             conditions.append("chat_id = ?")

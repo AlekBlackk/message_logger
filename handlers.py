@@ -162,7 +162,7 @@ class MessageLogger:
         self.storage.save_message(row, overwrite=overwrite)
         if media_type is None:
             return
-        media_path = await self.fetch_media(message, peer_id)
+        media_path = await self.fetch_media(message, peer_id, chat_title)
         if media_path is not None:
             self.storage.update_media_path(peer_id, message.id, media_path)
 
@@ -184,7 +184,15 @@ class MessageLogger:
                 return label
         return type(message.media).__name__
 
-    async def fetch_media(self, message, peer_id: int) -> str | None:
+    @staticmethod
+    def _safe_dir_name(title: str) -> str:
+        """Chat title as a filesystem-safe folder name (cross-platform)."""
+        name = re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .")
+        return name or "_"
+
+    async def fetch_media(
+        self, message, peer_id: int, chat_title: str | None = None
+    ) -> str | None:
         """Download media now — after deletion the file reference is dead."""
         file = getattr(message, "file", None)
         if not self.config.download_media or file is None:
@@ -196,7 +204,9 @@ class MessageLogger:
         ext = getattr(file, "ext", None) or ".bin"
         if not _SAFE_EXT_RE.match(ext):
             ext = ".bin"
-        target_dir = Path(self.config.media_dir) / str(peer_id)
+        title = chat_title or self.chat_title(peer_id)
+        dir_name = self._safe_dir_name(title) if title else str(peer_id)
+        target_dir = Path(self.config.media_dir) / dir_name
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{message.id}{ext}"
         try:

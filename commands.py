@@ -31,10 +31,10 @@ _PURGE_MAX_DAYS = 36500
 
 _PURGE_USAGE = (
     "<b>/purge</b> — очистка сообщений из БД.\n"
-    "/purge <дни> — по возрасту, все чаты (dry-run)\n"
+    "/purge <дни> — за последние N дней, все чаты (dry-run)\n"
     "/purge <@chat|id> — вся история чата (dry-run). Отрицательный id "
     "(группы/каналы) распознаётся напрямую; для личных чатов используй @username\n"
-    "/purge <@chat|id> <дни> — чат + возраст (dry-run)\n"
+    "/purge <@chat|id> <дни> — чат + последние N дней (dry-run)\n"
     "Добавь confirm в конец, чтобы реально удалить."
 )
 
@@ -216,7 +216,7 @@ class CommandHandler:
                 scope_label = utils.get_display_name(entity) or scope_label
 
         cutoff_ts = int(time.time()) - days * 86400 if days is not None else None
-        age_desc = f", старше {days} дн." if days is not None else ""
+        age_desc = f", за последние {days} дн." if days is not None else ""
 
         count, media_count = self.storage.count_purge_candidates(cutoff_ts, chat_id)
         if count == 0:
