@@ -33,6 +33,17 @@ _PURGE_USAGE = (
     "Добавь confirm в конец, чтобы реально удалить."
 )
 
+_HELP_TEXT = (
+    "<b>Команды:</b>\n"
+    "/watch [@username|id] — начать следить за чатом "
+    "(или ответом на пересланное сообщение)\n"
+    "/unwatch [@username|id] — снять чат со слежения\n"
+    "/list — список отслеживаемых чатов\n"
+    "/purge <дни|@chat> [дни] [confirm] — очистить сообщения из БД, "
+    "подробности: /purge без аргументов\n"
+    "/help — эта справка"
+)
+
 BackfillFn = Callable[[object, MessageLogger, Config, int], Awaitable[int]]
 
 
@@ -241,6 +252,9 @@ class CommandHandler:
             if len(pages) > 1:
                 header += f" ({i}/{len(pages)})"
             await self.logger.send_report("\n".join([header, *page]))
+
+    async def _help(self) -> None:
+        await self.logger.send_report(_HELP_TEXT)
 
     @staticmethod
     def _paginate(

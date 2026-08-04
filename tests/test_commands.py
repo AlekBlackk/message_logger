@@ -341,3 +341,20 @@ async def test_purge_by_negative_numeric_id_resolves_as_chat(tmp_path):
     assert db.find_message(-1001, 1) is None
     assert db.find_message(-1002, 1) is not None
     db.close()
+
+
+async def test_help_lists_all_commands(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/help"))
+    text = client.sent[-1][1]
+    for cmd in ("/watch", "/unwatch", "/list", "/purge", "/help"):
+        assert cmd in text
+    db.close()
+
+
+async def test_help_does_not_touch_storage(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.add_watch(-1001, "Chat A", 1000)
+    await handler.on_command(FakeEvent("/help"))
+    assert db.list_watch() == [(-1001, "Chat A", 1000)]
+    db.close()
