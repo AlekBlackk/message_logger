@@ -27,18 +27,22 @@ def _when(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=MSK).strftime("%Y-%m-%d %H:%M:%S MSK")
 
 
+def _mention(name: str | None, entity_id: int | None, username: str | None) -> str:
+    esc_name = _esc(name, "неизвестен")
+    if username:
+        return f'<a href="https://t.me/{html.escape(username)}">{esc_name}</a>'
+    if entity_id is not None:
+        return f'<a href="tg://user?id={entity_id}">{esc_name}</a>'
+    return esc_name
+
+
+def _who_line(label: str, name: str | None, entity_id: int | None, username: str | None) -> str:
+    mention = _mention(name, entity_id, username)
+    return f"<b>{label}:</b> {mention} (<code>{entity_id if entity_id is not None else '?'}</code>)"
+
+
 def _author_line(msg: StoredMessage, sender_username: str | None) -> str:
-    name = _esc(msg.sender_name, "неизвестен")
-    if sender_username:
-        author = f'<a href="https://t.me/{html.escape(sender_username)}">{name}</a>'
-    elif msg.sender_id is not None:
-        author = f'<a href="tg://user?id={msg.sender_id}">{name}</a>'
-    else:
-        author = name
-    return (
-        f"<b>Автор:</b> {author} "
-        f"(<code>{msg.sender_id if msg.sender_id is not None else '?'}</code>)"
-    )
+    return _who_line("Автор", msg.sender_name, msg.sender_id, sender_username)
 
 
 def _header(
@@ -99,4 +103,29 @@ def format_edited(
     lines.append("")
     lines.append("<b>Стало:</b>")
     lines.append(_body(new_text, msg.media_type, half))
+    return "\n".join(lines)
+
+
+def format_membership(
+    *,
+    joined: bool,
+    chat_title: str | None,
+    chat_id: int,
+    chat_username: str | None,
+    user_name: str | None,
+    user_id: int | None,
+    user_username: str | None,
+    actor_name: str | None = None,
+    actor_id: int | None = None,
+    actor_username: str | None = None,
+) -> str:
+    title = "➕ <b>Вступление в чат</b>" if joined else "➖ <b>Выход из чата</b>"
+    chat_line = f"<b>Чат:</b> {_esc(chat_title, 'без названия')}"
+    if chat_username:
+        chat_line += f" (@{html.escape(chat_username)})"
+    chat_line += f" (<code>{chat_id}</code>)"
+    lines = [title, chat_line, _who_line("Пользователь", user_name, user_id, user_username)]
+    if actor_name is not None or actor_id is not None:
+        label = "Добавил" if joined else "Удалил"
+        lines.append(_who_line(label, actor_name, actor_id, actor_username))
     return "\n".join(lines)

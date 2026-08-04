@@ -1,4 +1,4 @@
-from reports import MAX_TEXT_LEN, format_deleted, format_edited, truncate
+from reports import MAX_TEXT_LEN, format_deleted, format_edited, format_membership, truncate
 from storage import StoredMessage
 
 
@@ -77,3 +77,54 @@ def test_format_edited_escapes_html():
     out = format_edited(make_msg(), "<i>a</i>", "<i>b</i>")
     assert "<i>a</i>" not in out
     assert "&lt;i&gt;a&lt;/i&gt;" in out
+
+
+def make_membership(**kw):
+    base = dict(
+        joined=True,
+        chat_title="My Chat",
+        chat_id=-1001,
+        chat_username=None,
+        user_name="Bob",
+        user_id=99,
+        user_username="bobby",
+    )
+    base.update(kw)
+    return format_membership(**base)
+
+
+def test_format_membership_joined_contains_fields():
+    out = make_membership()
+    assert "Вступление" in out
+    assert "My Chat" in out
+    assert "Bob" in out
+    assert "99" in out
+
+
+def test_format_membership_left():
+    out = make_membership(joined=False)
+    assert "Выход" in out
+
+
+def test_format_membership_with_actor():
+    out = make_membership(actor_name="Carl", actor_id=7, actor_username="carl")
+    assert "Carl" in out
+    assert "Добавил" in out
+
+
+def test_format_membership_left_with_actor_says_kicked():
+    out = make_membership(joined=False, actor_name="Dana", actor_id=8)
+    assert "Удалил" in out
+
+
+def test_format_membership_without_actor_omits_line():
+    out = make_membership()
+    assert "Добавил" not in out
+    assert "Удалил" not in out
+
+
+def test_format_membership_escapes_html():
+    out = make_membership(user_name="<script>", chat_title="a&b")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "a&amp;b" in out

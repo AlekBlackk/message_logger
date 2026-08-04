@@ -45,6 +45,7 @@ def make_config(tmp_path, **kw):
         log_target="me",
         log_outgoing=True,
         log_edits=True,
+        log_joins=True,
         download_media=True,
         max_media_mb=1,
         media_dir=tmp_path / "media",
@@ -369,6 +370,125 @@ async def test_media_with_unsafe_extension_falls_back_to_bin(tmp_path):
     stored = db.find_message(-1001, 5)
     assert stored.media_path is not None
     assert stored.media_path.endswith(".bin")
+    db.close()
+
+
+def fake_chat_action_event(
+    *,
+    chat_id=-1001,
+    user_joined=False,
+    user_added=False,
+    user_left=False,
+    user_kicked=False,
+    users=None,
+    added_by=None,
+    kicked_by=None,
+):
+    joined_user = User(
+        id=99, is_self=False, contact=False, mutual_contact=False,
+        deleted=False, bot=False, bot_chat_history=False, bot_nochats=False,
+        verified=False, restricted=False, min=False, bot_inline_geo=False,
+        support=False, scam=False, apply_min_photo=False, fake=False,
+        first_name="Bob", last_name=None, username="bobby",
+    )
+    chat = Chat(
+        id=abs(chat_id), title="My Chat", photo=None,
+        participants_count=0, date=None, version=0,
+    )
+
+    async def get_users():
+        return users if users is not None else [joined_user]
+
+    async def get_added_by():
+        return added_by
+
+    async def get_kicked_by():
+        return kicked_by
+
+    return types.SimpleNamespace(
+        chat_id=chat_id,
+        chat=chat,
+        user_joined=user_joined,
+        user_added=user_added,
+        user_left=user_left,
+        user_kicked=user_kicked,
+        get_users=get_users,
+        get_added_by=get_added_by,
+        get_kicked_by=get_kicked_by,
+    )
+
+
+async def test_user_joined_is_reported(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_chat_action(fake_chat_action_event(user_joined=True))
+    assert len(client.sent) == 1
+    text = client.sent[0][1]
+    assert "Bob" in text
+    assert "Вступление" in text
+    db.close()
+
+
+async def test_user_added_includes_actor(tmp_path):
+    adder = User(
+        id=7, is_self=False, contact=False, mutual_contact=False,
+        deleted=False, bot=False, bot_chat_history=False, bot_nochats=False,
+        verified=False, restricted=False, min=False, bot_inline_geo=False,
+        support=False, scam=False, apply_min_photo=False, fake=False,
+        first_name="Carl", last_name=None, username="carl",
+    )
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_chat_action(fake_chat_action_event(user_added=True, added_by=adder))
+    text = client.sent[0][1]
+    assert "Bob" in text
+    assert "Carl" in text
+    assert "Добавил" in text
+    db.close()
+
+
+async def test_user_left_is_reported(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_chat_action(fake_chat_action_event(user_left=True))
+    text = client.sent[0][1]
+    assert "Выход" in text
+    db.close()
+
+
+async def test_user_kicked_includes_actor(tmp_path):
+    kicker = User(
+        id=8, is_self=False, contact=False, mutual_contact=False,
+        deleted=False, bot=False, bot_chat_history=False, bot_nochats=False,
+        verified=False, restricted=False, min=False, bot_inline_geo=False,
+        support=False, scam=False, apply_min_photo=False, fake=False,
+        first_name="Dana", last_name=None, username="dana",
+    )
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_chat_action(fake_chat_action_event(user_kicked=True, kicked_by=kicker))
+    text = client.sent[0][1]
+    assert "Выход" in text
+    assert "Dana" in text
+    assert "Удалил" in text
+    db.close()
+
+
+async def test_join_not_reported_when_log_joins_disabled(tmp_path):
+    logger, client, db = make_logger(tmp_path, log_joins=False)
+    await logger.on_chat_action(fake_chat_action_event(user_joined=True))
+    assert client.sent == []
+    db.close()
+
+
+async def test_join_in_untracked_chat_is_ignored(tmp_path):
+    logger, client, db = make_logger(tmp_path, watch={-1002})
+    await logger.on_chat_action(fake_chat_action_event(chat_id=-1001, user_joined=True))
+    assert client.sent == []
+    db.close()
+
+
+async def test_non_membership_action_is_ignored(tmp_path):
+    """new_title/new_photo events also fire ChatAction; only membership changes report."""
+    logger, client, db = make_logger(tmp_path)
+    await logger.on_chat_action(fake_chat_action_event())
+    assert client.sent == []
     db.close()
 
 

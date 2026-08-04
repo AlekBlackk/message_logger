@@ -59,6 +59,7 @@ class MessageLogger:
         self.client.add_event_handler(self.on_new_message, events.NewMessage())
         self.client.add_event_handler(self.on_message_edited, events.MessageEdited())
         self.client.add_event_handler(self.on_message_deleted, events.MessageDeleted())
+        self.client.add_event_handler(self.on_chat_action, events.ChatAction())
 
     # --- filtering --------------------------------------------------------
 
@@ -379,6 +380,62 @@ class MessageLogger:
                 await self.report_deleted(stored, source="live")
             except Exception:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
+
+    async def on_chat_action(self, event) -> None:
+        try:
+            chat_id = event.chat_id
+            if chat_id is None or not self.is_tracked(chat_id):
+                return
+            if not self.config.log_joins:
+                return
+            joined = event.user_joined or event.user_added
+            left = event.user_left or event.user_kicked
+            if not joined and not left:
+                return
+            self.remember_names(event)
+            users = await event.get_users()
+            if not users:
+                return
+            actor = None
+            if event.user_added:
+                actor = await event.get_added_by()
+            elif event.user_kicked:
+                actor = await event.get_kicked_by()
+            for user in users:
+                await self._report_membership(chat_id, user, joined=joined, actor=actor)
+        except Exception:
+            self.log.exception("on_chat_action failed")
+
+    async def _report_membership(self, chat_id: int, user, *, joined: bool, actor) -> None:
+        name = utils.get_display_name(user) or None
+        text = reports.format_membership(
+            joined=joined,
+            chat_title=self.chat_title(chat_id),
+            chat_id=chat_id,
+            chat_username=self.chat_username(chat_id),
+            user_name=name,
+            user_id=getattr(user, "id", None),
+            user_username=getattr(user, "username", None),
+            actor_name=utils.get_display_name(actor) if actor else None,
+            actor_id=getattr(actor, "id", None) if actor else None,
+            actor_username=getattr(actor, "username", None) if actor else None,
+        )
+        sent = await self.send_report(text)
+        if sent:
+            self.log.info(
+                "%s reported: chat [%s] user %s (%s)",
+                "join" if joined else "leave",
+                self.chat_label(chat_id),
+                name,
+                getattr(user, "id", None),
+            )
+        else:
+            self.log.warning(
+                "membership change NOT reported (send failed): chat [%s] user %s (%s)",
+                self.chat_label(chat_id),
+                name,
+                getattr(user, "id", None),
+            )
 
     # --- reconciliation ---------------------------------------------------
 

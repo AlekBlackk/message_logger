@@ -169,6 +169,25 @@ def test_logging_and_reconcile_defaults(tmp_path):
     assert cfg.reconcile_window_hours == 12
 
 
+def test_log_joins_defaults_true(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\n")
+    cfg = load_config(env)
+    assert cfg.log_joins is True
+
+
+def test_log_joins_false(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_JOINS=false\n")
+    cfg = load_config(env)
+    assert cfg.log_joins is False
+
+
+def test_log_joins_typo_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_JOINS=ture\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "LOG_JOINS" in str(exc.value)
+
+
 def test_log_level_is_normalised(tmp_path):
     env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_LEVEL=debug\n")
     assert load_config(env).log_level == "DEBUG"

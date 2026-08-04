@@ -41,6 +41,7 @@ ACCOUNTS_ENV=acc1.env,acc2.env python main.py
 | `LOG_TARGET` | Куда слать отчёты. `me` = Избранное. |
 | `LOG_OUTGOING` | Также логировать удаление собственных сообщений. |
 | `LOG_EDITS` | Присылать отчёт при редактировании сообщения. |
+| `LOG_JOINS` | Присылать отчёт при вступлении/выходе участника в отслеживаемом чате. |
 | `DOWNLOAD_MEDIA`, `MAX_MEDIA_MB`, `MEDIA_DIR` | Настройки сохранения медиа. |
 | `DB_PATH`, `RETENTION_DAYS` | Расположение кеша и срок хранения строк. |
 | `BACKFILL_ON_START`, `BACKFILL_LIMIT` | Прогрев кеша при старте. Нужен непустой `WATCH_CHATS`. |

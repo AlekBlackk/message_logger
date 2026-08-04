@@ -23,6 +23,7 @@ class Config:
     log_target: str
     log_outgoing: bool
     log_edits: bool
+    log_joins: bool
     download_media: bool
     max_media_mb: int
     media_dir: Path
@@ -147,6 +148,7 @@ def load_config(env_path: str = ".env") -> Config:
         log_target=(values.get("LOG_TARGET") or "me").strip(),
         log_outgoing=_as_bool("LOG_OUTGOING", values.get("LOG_OUTGOING") or "", True),
         log_edits=_as_bool("LOG_EDITS", values.get("LOG_EDITS") or "", True),
+        log_joins=_as_bool("LOG_JOINS", values.get("LOG_JOINS") or "", True),
         download_media=_as_bool(
             "DOWNLOAD_MEDIA", values.get("DOWNLOAD_MEDIA") or "", True
         ),
