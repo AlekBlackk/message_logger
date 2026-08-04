@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from storage import StoredMessage
 
 MAX_TEXT_LEN = 3500
+MSK = timezone(timedelta(hours=3))
 
 
 def truncate(text: str | None, limit: int = MAX_TEXT_LEN) -> str:
@@ -23,7 +24,7 @@ def _esc(value: str | None, fallback: str = "?") -> str:
 
 
 def _when(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.fromtimestamp(ts, tz=MSK).strftime("%Y-%m-%d %H:%M:%S MSK")
 
 
 def _author_line(msg: StoredMessage, sender_username: str | None) -> str:
