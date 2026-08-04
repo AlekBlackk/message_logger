@@ -334,6 +334,27 @@ def test_load_account_configs_rejects_duplicate_db_path(tmp_path, monkeypatch):
     assert "db_path" in str(exc.value)
 
 
+def test_max_media_total_mb_defaults_to_zero(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\n")
+    cfg = load_config(env)
+    assert cfg.max_media_total_mb == 0
+    assert cfg.max_media_total_bytes == 0
+
+
+def test_max_media_total_mb_reads_value(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nMAX_MEDIA_TOTAL_MB=10\n")
+    cfg = load_config(env)
+    assert cfg.max_media_total_mb == 10
+    assert cfg.max_media_total_bytes == 10 * 1024 * 1024
+
+
+def test_max_media_total_mb_negative_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nMAX_MEDIA_TOTAL_MB=-1\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "MAX_MEDIA_TOTAL_MB" in str(exc.value)
+
+
 def test_load_account_configs_allows_distinct_accounts(tmp_path, monkeypatch):
     """Sanity check: accounts with distinct label/session_name/db_path must
     load fine — the collision guard must not be over-eager."""

@@ -414,8 +414,37 @@ async def test_help_lists_all_commands(tmp_path):
     handler, client, db, _calls = make_handler(tmp_path)
     await handler.on_command(FakeEvent("/help"))
     text = client.sent[-1][1]
-    for cmd in ("/watch", "/unwatch", "/list", "/purge", "/help"):
+    for cmd in ("/watch", "/unwatch", "/list", "/purge", "/stats", "/help"):
         assert cmd in text
+    db.close()
+
+
+async def test_stats_reports_counts(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1001, msg_id=2, date=200))
+    await handler.on_command(FakeEvent("/stats"))
+    text = client.sent[-1][1]
+    assert "2" in text
+    assert "Статистика" in text
+    db.close()
+
+
+async def test_stats_on_empty_db_does_not_raise(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/stats"))
+    assert client.sent
+    db.close()
+
+
+async def test_stats_reports_media_dir_size(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    (media_dir / "1.jpg").write_bytes(b"x" * 500)
+    await handler.on_command(FakeEvent("/stats"))
+    text = client.sent[-1][1]
+    assert "1" in text  # media file count
     db.close()
 
 

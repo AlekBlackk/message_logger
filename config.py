@@ -26,6 +26,7 @@ class Config:
     log_joins: bool
     download_media: bool
     max_media_mb: int
+    max_media_total_mb: int
     media_dir: Path
     db_path: Path
     retention_days: int
@@ -43,6 +44,10 @@ class Config:
     @property
     def max_media_bytes(self) -> int:
         return self.max_media_mb * 1024 * 1024
+
+    @property
+    def max_media_total_bytes(self) -> int:
+        return self.max_media_total_mb * 1024 * 1024
 
     def proxy_dict(self) -> dict | None:
         """Telethon proxy argument in python-socks dict format."""
@@ -107,6 +112,10 @@ def load_config(env_path: str = ".env") -> Config:
     if max_media_mb < 0:
         raise ConfigError(f"MAX_MEDIA_MB must be >= 0, got {max_media_mb}")
 
+    max_media_total_mb = _as_int(values, "MAX_MEDIA_TOTAL_MB", 0)
+    if max_media_total_mb < 0:
+        raise ConfigError(f"MAX_MEDIA_TOTAL_MB must be >= 0, got {max_media_total_mb}")
+
     retention_days = _as_int(values, "RETENTION_DAYS", 14)
     if retention_days < 1:
         raise ConfigError(f"RETENTION_DAYS must be >= 1, got {retention_days}")
@@ -153,6 +162,7 @@ def load_config(env_path: str = ".env") -> Config:
             "DOWNLOAD_MEDIA", values.get("DOWNLOAD_MEDIA") or "", True
         ),
         max_media_mb=max_media_mb,
+        max_media_total_mb=max_media_total_mb,
         media_dir=Path((values.get("MEDIA_DIR") or "media").strip()),
         db_path=Path((values.get("DB_PATH") or "messages.db").strip()),
         retention_days=retention_days,

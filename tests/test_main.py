@@ -224,6 +224,48 @@ async def test_run_account_logs_when_cleanup_disconnect_fails(tmp_path, monkeypa
     assert result is True
 
 
+async def test_backfill_media_sizes_fills_in_missing_size(tmp_path):
+    from storage import Storage, StoredMessage
+
+    db = Storage(tmp_path / "db.sqlite")
+    media_file = tmp_path / "pic.jpg"
+    media_file.write_bytes(b"x" * 250)
+    db.save_message(
+        StoredMessage(
+            chat_id=-1001, msg_id=1, is_channel=True, chat_title="c",
+            sender_id=None, sender_name=None, text=None,
+            media_path=str(media_file), media_type="photo", date=100,
+        )
+    )
+    main.backfill_media_sizes(db, logging.getLogger("test"))
+    assert db.find_message(-1001, 1).media_size == 250
+    db.close()
+
+
+async def test_backfill_media_sizes_missing_file_gets_zero(tmp_path):
+    from storage import Storage, StoredMessage
+
+    db = Storage(tmp_path / "db.sqlite")
+    db.save_message(
+        StoredMessage(
+            chat_id=-1001, msg_id=1, is_channel=True, chat_title="c",
+            sender_id=None, sender_name=None, text=None,
+            media_path=str(tmp_path / "gone.jpg"), media_type="photo", date=100,
+        )
+    )
+    main.backfill_media_sizes(db, logging.getLogger("test"))
+    assert db.find_message(-1001, 1).media_size == 0
+    db.close()
+
+
+async def test_backfill_media_sizes_noop_when_nothing_missing(tmp_path):
+    from storage import Storage
+
+    db = Storage(tmp_path / "db.sqlite")
+    main.backfill_media_sizes(db, logging.getLogger("test"))  # must not raise
+    db.close()
+
+
 async def test_run_account_calls_backfill_after_register(tmp_path, monkeypatch):
     cfg = make_config(tmp_path, backfill_on_start=True, backfill_limit=5,
                        watch_chats=("@a",))

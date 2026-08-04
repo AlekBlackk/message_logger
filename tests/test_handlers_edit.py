@@ -6,7 +6,7 @@ from tests.test_handlers_new import fake_event, make_logger
 pytestmark = pytest.mark.asyncio
 
 
-def seed(db, text="old", chat_id=-1001, msg_id=5, is_channel=True):
+def seed(db, text="old", chat_id=-1001, msg_id=5, is_channel=True, reply_to_msg_id=None):
     db.save_message(
         StoredMessage(
             chat_id=chat_id,
@@ -20,6 +20,7 @@ def seed(db, text="old", chat_id=-1001, msg_id=5, is_channel=True):
             media_type=None,
             date=1700000000,
             deleted=False,
+            reply_to_msg_id=reply_to_msg_id,
         )
     )
 
@@ -85,6 +86,16 @@ async def test_edit_with_identical_text_is_ignored(tmp_path):
     await logger.on_message_edited(fake_event(text="same"))
     assert client.sent == []
     assert db.get_edits(-1001, 5) == []
+    db.close()
+
+
+async def test_edit_report_includes_reply_context(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, text="original")
+    seed(db, chat_id=-1001, msg_id=5, text="old", reply_to_msg_id=1)
+    await logger.on_message_edited(fake_event(text="new"))
+    assert "В ответ на" in client.sent[0][1]
+    assert "original" in client.sent[0][1]
     db.close()
 
 

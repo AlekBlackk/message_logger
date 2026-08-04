@@ -18,7 +18,9 @@ from storage import Storage
 
 log = logging.getLogger(__name__)
 
-_COMMAND_RE = re.compile(r"^/(watch|unwatch|list|purge|help)\b\s*(.*)$", re.IGNORECASE)
+_COMMAND_RE = re.compile(
+    r"^/(watch|unwatch|list|purge|stats|help)\b\s*(.*)$", re.IGNORECASE
+)
 
 # Leaves headroom under Telegram's 4096-char message cap for the header line
 # and HTML markup around each entry.
@@ -46,6 +48,7 @@ _HELP_TEXT = (
     "/list — список отслеживаемых чатов\n"
     "/purge <дни|@chat> [дни] [confirm] — очистить сообщения из БД, "
     "подробности: /purge без аргументов\n"
+    "/stats — статистика кеша (сообщения, чаты, размер БД и медиа)\n"
     "/help — эта справка"
 )
 
@@ -103,6 +106,8 @@ class CommandHandler:
             await self._unwatch(event, arg)
         elif command == "purge":
             await self._purge(event, arg)
+        elif command == "stats":
+            await self._stats()
         elif command == "help":
             await self._help()
         else:
@@ -269,6 +274,49 @@ class CommandHandler:
             if len(pages) > 1:
                 header += f" ({i}/{len(pages)})"
             await self.logger.send_report("\n".join([header, *page]))
+
+    async def _stats(self) -> None:
+        data = self.storage.stats()
+        db_size = self._path_size(Path(self.config.db_path))
+        for suffix in ("-wal", "-shm"):
+            db_size += self._path_size(Path(str(self.config.db_path) + suffix))
+        media_count, media_bytes = self._media_dir_size(Path(self.config.media_dir))
+        top_chats = [
+            (self.logger.chat_label(chat_id), count) for chat_id, count in data["top_chats"]
+        ]
+        text = reports.format_stats(
+            total_messages=data["total_messages"],
+            deleted_messages=data["deleted_messages"],
+            total_edits=data["total_edits"],
+            distinct_chats=data["distinct_chats"],
+            watched_chats=data["watched_chats"],
+            oldest_date=data["oldest_date"],
+            newest_date=data["newest_date"],
+            db_size_bytes=db_size,
+            media_file_count=media_count,
+            media_dir_bytes=media_bytes,
+            top_chats=top_chats,
+        )
+        await self.logger.send_report(text)
+
+    @staticmethod
+    def _path_size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    @staticmethod
+    def _media_dir_size(media_dir: Path) -> tuple[int, int]:
+        if not media_dir.exists():
+            return 0, 0
+        count = 0
+        total = 0
+        for entry in media_dir.rglob("*"):
+            if entry.is_file():
+                count += 1
+                total += CommandHandler._path_size(entry)
+        return count, total
 
     async def _help(self) -> None:
         await self.logger.send_report(_HELP_TEXT)

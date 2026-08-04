@@ -43,6 +43,22 @@ def setup_logging(cfg: Config) -> None:
     logging.getLogger("telethon").setLevel(logging.WARNING)
 
 
+def backfill_media_sizes(storage: Storage, acc_log: logging.Logger) -> None:
+    """One-time (per row) fill-in of media_size for files downloaded before
+    the media quota feature existed — quota accounting would otherwise treat
+    them as zero-size and never count them toward MAX_MEDIA_TOTAL_MB."""
+    rows = storage.rows_missing_media_size()
+    if not rows:
+        return
+    for chat_id, msg_id, media_path in rows:
+        try:
+            size = Path(media_path).stat().st_size
+        except OSError:
+            size = 0
+        storage.set_media_size(chat_id, msg_id, size)
+    acc_log.info("media quota: backfilled size for %s previously downloaded file(s)", len(rows))
+
+
 async def resolve_peer_ids(client, refs: tuple[str, ...]) -> set[int]:
     """Turn .env chat references into normalized peer ids.
 
@@ -221,6 +237,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
         # escape run_all()'s asyncio.gather(), whose return list is unread.
         acc_log.exception("account %s crashed", label)
         return False
+    backfill_media_sizes(storage, acc_log)
     client = None
     background: list[asyncio.Task] = []
     ok = False

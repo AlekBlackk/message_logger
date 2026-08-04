@@ -1,4 +1,11 @@
-from reports import MAX_TEXT_LEN, format_deleted, format_edited, format_membership, truncate
+from reports import (
+    MAX_TEXT_LEN,
+    format_deleted,
+    format_edited,
+    format_membership,
+    format_stats,
+    truncate,
+)
 from storage import StoredMessage
 
 
@@ -121,6 +128,85 @@ def test_format_membership_without_actor_omits_line():
     out = make_membership()
     assert "Добавил" not in out
     assert "Удалил" not in out
+
+
+def test_format_deleted_includes_reply_preview():
+    out = format_deleted(make_msg(), reply_preview="Bob: original text")
+    assert "В ответ на" in out
+    assert "Bob: original text" in out
+
+
+def test_format_deleted_omits_reply_line_when_none():
+    out = format_deleted(make_msg())
+    assert "В ответ на" not in out
+
+
+def test_format_deleted_escapes_reply_preview():
+    out = format_deleted(make_msg(), reply_preview="<script>x</script>")
+    assert "<script>x</script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_format_edited_includes_reply_preview():
+    out = format_edited(make_msg(), "before", "after", reply_preview="Bob: original")
+    assert "В ответ на" in out
+    assert "Bob: original" in out
+
+
+def test_format_stats_contains_counts():
+    out = format_stats(
+        total_messages=10,
+        deleted_messages=2,
+        total_edits=3,
+        distinct_chats=4,
+        watched_chats=1,
+        oldest_date=1700000000,
+        newest_date=1700003600,
+        db_size_bytes=2048,
+        media_file_count=5,
+        media_dir_bytes=1024 * 1024,
+        top_chats=[("Chat A", 7), ("Chat B", 3)],
+    )
+    assert "10" in out
+    assert "Chat A" in out
+    assert "7" in out
+    assert "2.0 КБ" in out
+    assert "1.0 МБ" in out
+
+
+def test_format_stats_omits_date_range_when_empty():
+    out = format_stats(
+        total_messages=0,
+        deleted_messages=0,
+        total_edits=0,
+        distinct_chats=0,
+        watched_chats=0,
+        oldest_date=None,
+        newest_date=None,
+        db_size_bytes=0,
+        media_file_count=0,
+        media_dir_bytes=0,
+        top_chats=[],
+    )
+    assert "Диапазон дат" not in out
+
+
+def test_format_stats_escapes_chat_labels():
+    out = format_stats(
+        total_messages=1,
+        deleted_messages=0,
+        total_edits=0,
+        distinct_chats=1,
+        watched_chats=0,
+        oldest_date=None,
+        newest_date=None,
+        db_size_bytes=0,
+        media_file_count=0,
+        media_dir_bytes=0,
+        top_chats=[("<script>", 1)],
+    )
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
 
 
 def test_format_membership_escapes_html():

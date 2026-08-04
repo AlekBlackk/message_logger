@@ -248,3 +248,140 @@ def test_purge_requires_a_filter(tmp_path):
     with pytest.raises(ValueError):
         db.purge(None, None)
     db.close()
+
+
+def test_migrate_adds_columns_to_pre_existing_db(tmp_path):
+    """A DB created before media_size/reply_to_msg_id existed must gain them
+    via ALTER TABLE, not silently keep the old schema (CREATE TABLE IF NOT
+    EXISTS is a no-op on a table that already exists)."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE messages (
+            chat_id INTEGER NOT NULL, msg_id INTEGER NOT NULL,
+            is_channel INTEGER NOT NULL DEFAULT 0, chat_title TEXT,
+            sender_id INTEGER, sender_name TEXT, text TEXT,
+            media_path TEXT, media_type TEXT, date INTEGER NOT NULL,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, msg_id)
+        );
+        CREATE TABLE watch_chats (chat_id INTEGER PRIMARY KEY, label TEXT, added_at INTEGER);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Storage(path)
+    db.save_message(make_msg())
+    got = db.find_message(-1001, 10)
+    assert got.media_size is None
+    assert got.reply_to_msg_id is None
+    db.close()
+
+
+def test_media_size_and_reply_to_round_trip(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(media_size=123, reply_to_msg_id=9))
+    got = db.find_message(-1001, 10)
+    assert got.media_size == 123
+    assert got.reply_to_msg_id == 9
+    db.close()
+
+
+def test_media_total_bytes_sums_only_rows_with_media(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, media_path="a.jpg", media_size=100))
+    db.save_message(make_msg(msg_id=2, media_path="b.jpg", media_size=200))
+    db.save_message(make_msg(msg_id=3, media_path=None, media_size=None))
+    assert db.media_total_bytes() == 300
+    db.close()
+
+
+def test_evict_oldest_media_stops_once_under_target(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=100, media_path="a.jpg", media_size=100))
+    db.save_message(make_msg(msg_id=2, date=200, media_path="b.jpg", media_size=100))
+    db.save_message(make_msg(msg_id=3, date=300, media_path="c.jpg", media_size=100))
+
+    # total=300 over target=250: evicting only the oldest (a.jpg, 100) leaves
+    # 200, already <=250, so eviction stops there without touching b.jpg.
+    paths = db.evict_oldest_media(250)
+
+    assert paths == ["a.jpg"]
+    assert db.find_message(-1001, 1).media_path is None
+    assert db.find_message(-1001, 1).media_size is None
+    assert db.find_message(-1001, 2).media_path == "b.jpg"
+    assert db.media_total_bytes() == 200
+    db.close()
+
+
+def test_evict_oldest_media_noop_when_already_under_target(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=100, media_path="a.jpg", media_size=50))
+    assert db.evict_oldest_media(1000) == []
+    assert db.find_message(-1001, 1).media_path == "a.jpg"
+    db.close()
+
+
+def test_evict_oldest_media_keeps_message_row(tmp_path):
+    """Eviction drops the media reference only — text and metadata survive."""
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, date=100, media_path="a.jpg", media_size=100, text="hi"))
+    db.evict_oldest_media(0)
+    got = db.find_message(-1001, 1)
+    assert got is not None
+    assert got.text == "hi"
+    assert got.media_path is None
+    db.close()
+
+
+def test_rows_missing_media_size(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, media_path="a.jpg", media_size=None))
+    db.save_message(make_msg(msg_id=2, media_path="b.jpg", media_size=50))
+    db.save_message(make_msg(msg_id=3, media_path=None))
+    assert db.rows_missing_media_size() == [(-1001, 1, "a.jpg")]
+    db.close()
+
+
+def test_set_media_size(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(msg_id=1, media_path="a.jpg", media_size=None))
+    db.set_media_size(-1001, 1, 77)
+    assert db.find_message(-1001, 1).media_size == 77
+    db.close()
+
+
+def test_stats_counts_and_top_chats(tmp_path):
+    db = open_db(tmp_path)
+    db.save_message(make_msg(chat_id=-1, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1, msg_id=2, date=200))
+    db.save_message(make_msg(chat_id=-2, msg_id=1, date=150))
+    db.mark_deleted(-1, 1)
+    db.add_edit(-1, 2, "old", "new", 200)
+    db.add_watch(-1, "Chat 1", 1000)
+
+    stats = db.stats()
+
+    assert stats["total_messages"] == 3
+    assert stats["deleted_messages"] == 1
+    assert stats["total_edits"] == 1
+    assert stats["distinct_chats"] == 2
+    assert stats["watched_chats"] == 1
+    assert stats["oldest_date"] == 100
+    assert stats["newest_date"] == 200
+    assert stats["top_chats"][0] == (-1, 2)
+    db.close()
+
+
+def test_stats_empty_db(tmp_path):
+    db = open_db(tmp_path)
+    stats = db.stats()
+    assert stats["total_messages"] == 0
+    assert stats["oldest_date"] is None
+    assert stats["newest_date"] is None
+    assert stats["top_chats"] == []
+    db.close()

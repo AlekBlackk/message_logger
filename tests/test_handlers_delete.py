@@ -12,7 +12,7 @@ def delete_event(deleted_ids, chat_id=None):
     return types.SimpleNamespace(deleted_ids=deleted_ids, chat_id=chat_id)
 
 
-def seed(db, *, chat_id, msg_id, is_channel, text="hello", media_path=None):
+def seed(db, *, chat_id, msg_id, is_channel, text="hello", media_path=None, reply_to_msg_id=None):
     db.save_message(
         StoredMessage(
             chat_id=chat_id,
@@ -26,6 +26,7 @@ def seed(db, *, chat_id, msg_id, is_channel, text="hello", media_path=None):
             media_type="MessageMediaPhoto" if media_path else None,
             date=1700000000,
             deleted=False,
+            reply_to_msg_id=reply_to_msg_id,
         )
     )
 
@@ -204,6 +205,24 @@ async def test_uncached_deletion_in_known_chat_warns(tmp_path, caplog):
         "not in cache" in r.message and r.levelname == "WARNING"
         for r in caplog.records
     )
+    db.close()
+
+
+async def test_deletion_report_includes_reply_context(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="original")
+    seed(db, chat_id=-1001, msg_id=5, is_channel=True, text="secret", reply_to_msg_id=1)
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    assert "В ответ на" in client.sent[0][1]
+    assert "original" in client.sent[0][1]
+    db.close()
+
+
+async def test_deletion_report_omits_reply_context_when_parent_uncached(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=5, is_channel=True, text="secret", reply_to_msg_id=999)
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    assert "В ответ на" not in client.sent[0][1]
     db.close()
 
 

@@ -155,6 +155,7 @@ class MessageLogger:
             media_type=media_type,
             date=int(message.date.timestamp()),
             deleted=False,
+            reply_to_msg_id=getattr(message, "reply_to_msg_id", None),
         )
         # Row first, download second: updates are dispatched concurrently, so a
         # message deleted while its media is still downloading would otherwise
@@ -162,9 +163,13 @@ class MessageLogger:
         self.storage.save_message(row, overwrite=overwrite)
         if media_type is None:
             return
-        media_path = await self.fetch_media(message, peer_id, chat_title)
-        if media_path is not None:
-            self.storage.update_media_path(peer_id, message.id, media_path)
+        downloaded = await self.fetch_media(message, peer_id, chat_title)
+        if downloaded is None:
+            return
+        media_path, media_size = downloaded
+        self.storage.update_media_path(peer_id, message.id, media_path, media_size)
+        if self.config.max_media_total_bytes > 0:
+            await self.enforce_media_quota()
 
     @staticmethod
     def _media_label(message) -> str:
@@ -192,7 +197,7 @@ class MessageLogger:
 
     async def fetch_media(
         self, message, peer_id: int, chat_title: str | None = None
-    ) -> str | None:
+    ) -> tuple[str, int] | None:
         """Download media now — after deletion the file reference is dead."""
         file = getattr(message, "file", None)
         if not self.config.download_media or file is None:
@@ -214,7 +219,41 @@ class MessageLogger:
         except Exception:
             self.log.exception("failed to download media for message %s", message.id)
             return None
-        return str(target)
+        return str(target), size
+
+    async def enforce_media_quota(self) -> None:
+        """Evict the oldest downloaded media until MAX_MEDIA_TOTAL_MB is met
+        again. Message rows survive with their text — only the media file and
+        its DB reference are dropped."""
+        paths = self.storage.evict_oldest_media(self.config.max_media_total_bytes)
+        for path in paths:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError as exc:
+                self.log.warning("quota eviction: cannot delete media %s: %s", path, exc)
+        if paths:
+            self.log.info(
+                "media quota: evicted %s file(s) to stay under %s MB",
+                len(paths),
+                self.config.max_media_total_mb,
+            )
+
+    # --- reply context ------------------------------------------------------
+
+    def reply_preview(self, chat_id: int, reply_to_msg_id: int | None) -> str | None:
+        """One-line summary of the message a deleted/edited message replied
+        to, for context in the report. None when there is no reply, or the
+        parent was never cached (untracked chat, purged, bot offline)."""
+        if not reply_to_msg_id:
+            return None
+        parent = self.storage.find_message(chat_id, reply_to_msg_id)
+        if parent is None:
+            return None
+        name = parent.sender_name or "?"
+        body = reports.truncate(parent.text, 120) or (
+            f"[{parent.media_type}]" if parent.media_type else "без текста"
+        )
+        return f"{name}: {body}"
 
     # --- sending ----------------------------------------------------------
 
@@ -325,6 +364,7 @@ class MessageLogger:
                         new_text,
                         self.chat_username(peer_id),
                         self.sender_username(previous.sender_id),
+                        reply_preview=self.reply_preview(peer_id, previous.reply_to_msg_id),
                     )
                 )
         except Exception:
@@ -339,6 +379,7 @@ class MessageLogger:
                 stored,
                 self.chat_username(stored.chat_id),
                 self.sender_username(stored.sender_id),
+                reply_preview=self.reply_preview(stored.chat_id, stored.reply_to_msg_id),
             ),
             media_path=stored.media_path,
         )

@@ -5,7 +5,7 @@ from telethon.tl.types import Chat, User
 
 from config import Config
 from handlers import MessageLogger
-from storage import Storage
+from storage import Storage, StoredMessage
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,6 +48,7 @@ def make_config(tmp_path, **kw):
         log_joins=True,
         download_media=True,
         max_media_mb=1,
+        max_media_total_mb=0,
         media_dir=tmp_path / "media",
         db_path=tmp_path / "db.sqlite",
         retention_days=14,
@@ -92,6 +93,7 @@ def fake_event(
     file=None,
     date_ts=1700000000,
     edit_date_ts=None,
+    reply_to_msg_id=None,
 ):
     import datetime
 
@@ -120,6 +122,7 @@ def fake_event(
             if edit_date_ts is not None
             else None
         ),
+        reply_to_msg_id=reply_to_msg_id,
     )
     return types.SimpleNamespace(
         chat_id=chat_id,
@@ -260,6 +263,70 @@ async def test_media_skipped_when_download_disabled(tmp_path):
     await logger.on_new_message(fake_event(media=object(), file=file))
     assert db.find_message(-1001, 5).media_path is None
     assert client.downloads == []
+    db.close()
+
+
+async def test_new_message_stores_reply_to_msg_id(tmp_path):
+    logger, _client, db = make_logger(tmp_path)
+    await logger.on_new_message(fake_event(reply_to_msg_id=1))
+    assert db.find_message(-1001, 5).reply_to_msg_id == 1
+    db.close()
+
+
+async def test_new_message_without_reply_stores_none(tmp_path):
+    logger, _client, db = make_logger(tmp_path)
+    await logger.on_new_message(fake_event())
+    assert db.find_message(-1001, 5).reply_to_msg_id is None
+    db.close()
+
+
+async def test_media_download_records_media_size(tmp_path):
+    file = types.SimpleNamespace(size=1024, ext=".jpg", mime_type="image/jpeg")
+    logger, _client, db = make_logger(tmp_path)
+    await logger.on_new_message(fake_event(media=object(), file=file))
+    assert db.find_message(-1001, 5).media_size == 1024
+    db.close()
+
+
+async def test_media_quota_evicts_oldest_when_exceeded(tmp_path):
+    # MAX_MEDIA_TOTAL_MB=1 (1_048_576 bytes): two 700_000-byte downloads push
+    # the running total over budget on the second, evicting the first.
+    file = types.SimpleNamespace(size=700_000, ext=".jpg", mime_type="image/jpeg")
+    logger, client, db = make_logger(tmp_path, max_media_total_mb=1)
+    await logger.on_new_message(fake_event(msg_id=1, media=object(), file=file))
+    await logger.on_new_message(fake_event(msg_id=2, media=object(), file=file))
+    assert db.find_message(-1001, 1).media_path is None
+    assert db.find_message(-1001, 2).media_path is not None
+    db.close()
+
+
+async def test_media_quota_disabled_by_default_never_evicts(tmp_path):
+    # Same 700_000-byte files that trigger eviction with a 1 MB quota above —
+    # with the quota disabled (default 0), nothing gets evicted.
+    file = types.SimpleNamespace(size=700_000, ext=".jpg", mime_type="image/jpeg")
+    logger, client, db = make_logger(tmp_path, max_media_total_mb=0)
+    await logger.on_new_message(fake_event(msg_id=1, media=object(), file=file))
+    await logger.on_new_message(fake_event(msg_id=2, media=object(), file=file))
+    assert db.find_message(-1001, 1).media_path is not None
+    assert db.find_message(-1001, 2).media_path is not None
+    db.close()
+
+
+async def test_enforce_media_quota_unlinks_evicted_file(tmp_path):
+    logger, _client, db = make_logger(tmp_path, max_media_total_mb=1)
+    media_file = tmp_path / "old.jpg"
+    media_file.write_bytes(b"x" * 100)
+    db.save_message(
+        StoredMessage(
+            chat_id=-1001, msg_id=1, is_channel=True, chat_title="c",
+            sender_id=None, sender_name=None, text=None,
+            media_path=str(media_file), media_type="photo", date=100,
+            media_size=2 * 1024 * 1024,  # already over the 1 MB budget
+        )
+    )
+    await logger.enforce_media_quota()
+    assert not media_file.exists()
+    assert db.find_message(-1001, 1).media_path is None
     db.close()
 
 

@@ -8,17 +8,19 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
-    chat_id     INTEGER NOT NULL,
-    msg_id      INTEGER NOT NULL,
-    is_channel  INTEGER NOT NULL DEFAULT 0,
-    chat_title  TEXT,
-    sender_id   INTEGER,
-    sender_name TEXT,
-    text        TEXT,
-    media_path  TEXT,
-    media_type  TEXT,
-    date        INTEGER NOT NULL,
-    deleted     INTEGER NOT NULL DEFAULT 0,
+    chat_id         INTEGER NOT NULL,
+    msg_id          INTEGER NOT NULL,
+    is_channel      INTEGER NOT NULL DEFAULT 0,
+    chat_title      TEXT,
+    sender_id       INTEGER,
+    sender_name     TEXT,
+    text            TEXT,
+    media_path      TEXT,
+    media_type      TEXT,
+    date            INTEGER NOT NULL,
+    deleted         INTEGER NOT NULL DEFAULT 0,
+    media_size      INTEGER,
+    reply_to_msg_id INTEGER,
     PRIMARY KEY (chat_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(msg_id);
@@ -42,7 +44,7 @@ CREATE TABLE IF NOT EXISTS watch_chats (
 
 _COLUMNS = (
     "chat_id, msg_id, is_channel, chat_title, sender_id, sender_name, "
-    "text, media_path, media_type, date, deleted"
+    "text, media_path, media_type, date, deleted, media_size, reply_to_msg_id"
 )
 
 
@@ -59,6 +61,8 @@ class StoredMessage:
     media_type: str | None
     date: int
     deleted: bool = False
+    media_size: int | None = None
+    reply_to_msg_id: int | None = None
 
 
 class Storage:
@@ -72,13 +76,23 @@ class Storage:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database already existed on disk —
+        CREATE TABLE IF NOT EXISTS in SCHEMA never touches an existing table."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(messages)")}
+        if "media_size" not in cols:
+            self.conn.execute("ALTER TABLE messages ADD COLUMN media_size INTEGER")
+        if "reply_to_msg_id" not in cols:
+            self.conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
 
     def save_message(self, msg: StoredMessage, *, overwrite: bool = True) -> None:
         verb = "REPLACE" if overwrite else "IGNORE"
         self.conn.execute(
             f"INSERT OR {verb} INTO messages ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 msg.chat_id,
                 msg.msg_id,
@@ -91,6 +105,8 @@ class Storage:
                 msg.media_type,
                 msg.date,
                 int(msg.deleted),
+                msg.media_size,
+                msg.reply_to_msg_id,
             ),
         )
         self.conn.commit()
@@ -124,12 +140,62 @@ class Storage:
         )
         self.conn.commit()
 
-    def update_media_path(self, chat_id: int, msg_id: int, media_path: str) -> None:
+    def update_media_path(
+        self, chat_id: int, msg_id: int, media_path: str, media_size: int | None = None
+    ) -> None:
         self.conn.execute(
-            "UPDATE messages SET media_path = ? WHERE chat_id = ? AND msg_id = ?",
-            (media_path, chat_id, msg_id),
+            "UPDATE messages SET media_path = ?, media_size = ? "
+            "WHERE chat_id = ? AND msg_id = ?",
+            (media_path, media_size, chat_id, msg_id),
         )
         self.conn.commit()
+
+    def set_media_size(self, chat_id: int, msg_id: int, media_size: int) -> None:
+        self.conn.execute(
+            "UPDATE messages SET media_size = ? WHERE chat_id = ? AND msg_id = ?",
+            (media_size, chat_id, msg_id),
+        )
+        self.conn.commit()
+
+    def rows_missing_media_size(self) -> list[tuple[int, int, str]]:
+        """(chat_id, msg_id, media_path) for rows downloaded before media_size
+        was tracked — used to backfill it once from the files already on disk."""
+        rows = self.conn.execute(
+            "SELECT chat_id, msg_id, media_path FROM messages "
+            "WHERE media_path IS NOT NULL AND media_size IS NULL"
+        ).fetchall()
+        return [(r["chat_id"], r["msg_id"], r["media_path"]) for r in rows]
+
+    def media_total_bytes(self) -> int:
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(media_size), 0) FROM messages WHERE media_path IS NOT NULL"
+        ).fetchone()[0]
+
+    def evict_oldest_media(self, target_bytes: int) -> list[str]:
+        """Drop the media reference (oldest message first) from rows until the
+        tracked total is back under target_bytes. Message rows and their text
+        stay — only media_path/media_size are cleared. Returns the freed file
+        paths for the caller to unlink from disk."""
+        total = self.media_total_bytes()
+        if total <= target_bytes:
+            return []
+        rows = self.conn.execute(
+            "SELECT chat_id, msg_id, media_path, media_size FROM messages "
+            "WHERE media_path IS NOT NULL ORDER BY date ASC"
+        ).fetchall()
+        paths: list[str] = []
+        for row in rows:
+            if total <= target_bytes:
+                break
+            paths.append(row["media_path"])
+            total -= row["media_size"] or 0
+            self.conn.execute(
+                "UPDATE messages SET media_path = NULL, media_size = NULL "
+                "WHERE chat_id = ? AND msg_id = ?",
+                (row["chat_id"], row["msg_id"]),
+            )
+        self.conn.commit()
+        return paths
 
     def alive_ids(self, chat_id: int, since_ts: int) -> list[int]:
         """Ids this chat is still believed to hold, for reconciliation against
@@ -267,6 +333,38 @@ class Storage:
         self.conn.commit()
         return paths
 
+    def stats(self, top_n: int = 10) -> dict:
+        """Snapshot for /stats: counts, date range, and the busiest chats.
+        Disk sizes (DB file, media directory) are not SQLite's business — the
+        caller stats those paths itself."""
+        total_messages = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        deleted_messages = self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE deleted = 1"
+        ).fetchone()[0]
+        total_edits = self.conn.execute("SELECT COUNT(*) FROM edits").fetchone()[0]
+        distinct_chats = self.conn.execute(
+            "SELECT COUNT(DISTINCT chat_id) FROM messages"
+        ).fetchone()[0]
+        watched_chats = self.conn.execute("SELECT COUNT(*) FROM watch_chats").fetchone()[0]
+        oldest, newest = self.conn.execute(
+            "SELECT MIN(date), MAX(date) FROM messages"
+        ).fetchone()
+        top_rows = self.conn.execute(
+            "SELECT chat_id, COUNT(*) AS cnt FROM messages "
+            "GROUP BY chat_id ORDER BY cnt DESC LIMIT ?",
+            (top_n,),
+        ).fetchall()
+        return {
+            "total_messages": total_messages,
+            "deleted_messages": deleted_messages,
+            "total_edits": total_edits,
+            "distinct_chats": distinct_chats,
+            "watched_chats": watched_chats,
+            "oldest_date": oldest,
+            "newest_date": newest,
+            "top_chats": [(r["chat_id"], r["cnt"]) for r in top_rows],
+        }
+
     def close(self) -> None:
         self.conn.close()
 
@@ -286,4 +384,6 @@ class Storage:
             media_type=row["media_type"],
             date=row["date"],
             deleted=bool(row["deleted"]),
+            media_size=row["media_size"],
+            reply_to_msg_id=row["reply_to_msg_id"],
         )

@@ -24,7 +24,7 @@ def _esc(value: str | None, fallback: str = "?") -> str:
 
 
 def _when(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=MSK).strftime("%Y-%m-%d %H:%M:%S MSK")
+    return datetime.fromtimestamp(ts, tz=MSK).strftime("%d.%m.%Y %H:%M:%S MSK")
 
 
 def _mention(name: str | None, entity_id: int | None, username: str | None) -> str:
@@ -75,12 +75,21 @@ def _body(
     return "<i>без текста</i>"
 
 
+def _reply_line(reply_preview: str | None) -> list[str]:
+    if reply_preview is None:
+        return []
+    return [f"<b>В ответ на:</b> {html.escape(truncate(reply_preview, 150))}"]
+
+
 def format_deleted(
     msg: StoredMessage,
     username: str | None = None,
     sender_username: str | None = None,
+    *,
+    reply_preview: str | None = None,
 ) -> str:
     lines = _header(msg, "🗑 <b>Удалённое сообщение</b>", username, sender_username)
+    lines.extend(_reply_line(reply_preview))
     lines.append("")
     lines.append(_body(msg.text, msg.media_type))
     return "\n".join(lines)
@@ -92,17 +101,63 @@ def format_edited(
     new_text: str | None,
     username: str | None = None,
     sender_username: str | None = None,
+    *,
+    reply_preview: str | None = None,
 ) -> str:
     # Two bodies in one message — halve the budget so the report stays under
     # Telegram's 4096-character ceiling.
     half = MAX_TEXT_LEN // 2
     lines = _header(msg, "✏️ <b>Сообщение отредактировано</b>", username, sender_username)
+    lines.extend(_reply_line(reply_preview))
     lines.append("")
     lines.append("<b>Было:</b>")
     lines.append(_body(old_text, msg.media_type, half))
     lines.append("")
     lines.append("<b>Стало:</b>")
     lines.append(_body(new_text, msg.media_type, half))
+    return "\n".join(lines)
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if size < 1024 or unit == "ГБ":
+            return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num_bytes} Б"
+
+
+def format_stats(
+    *,
+    total_messages: int,
+    deleted_messages: int,
+    total_edits: int,
+    distinct_chats: int,
+    watched_chats: int,
+    oldest_date: int | None,
+    newest_date: int | None,
+    db_size_bytes: int,
+    media_file_count: int,
+    media_dir_bytes: int,
+    top_chats: list[tuple[str, int]],
+) -> str:
+    lines = [
+        "📊 <b>Статистика</b>",
+        f"<b>Сообщений в кеше:</b> {total_messages} (удалено: {deleted_messages})",
+        f"<b>Правок сохранено:</b> {total_edits}",
+        f"<b>Чатов в кеше:</b> {distinct_chats}, отслеживается: {watched_chats}",
+    ]
+    if oldest_date is not None and newest_date is not None:
+        lines.append(f"<b>Диапазон дат:</b> {_when(oldest_date)} — {_when(newest_date)}")
+    lines.append(f"<b>Размер БД:</b> {_human_size(db_size_bytes)}")
+    lines.append(
+        f"<b>Медиафайлов на диске:</b> {media_file_count} ({_human_size(media_dir_bytes)})"
+    )
+    if top_chats:
+        lines.append("")
+        lines.append("<b>Топ чатов по числу сообщений:</b>")
+        for label, count in top_chats:
+            lines.append(f"— {html.escape(label)}: {count}")
     return "\n".join(lines)
 
 
