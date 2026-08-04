@@ -166,6 +166,34 @@ def test_logging_and_reconcile_defaults(tmp_path):
     assert cfg.log_level == "INFO"
     assert cfg.log_file is None
     assert cfg.reconcile_interval_min == 10
+    # Defaults to RETENTION_DAYS*24h so nothing ages out of the reconcile
+    # window before purge, unless the operator explicitly overrides it.
+    assert cfg.reconcile_window_hours == cfg.retention_days * 24
+
+
+def test_reconcile_window_defaults_to_retention_span(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nRETENTION_DAYS=3\n")
+    cfg = load_config(env)
+    assert cfg.reconcile_window_hours == 72
+
+
+def test_reconcile_window_shorter_than_retention_raises(tmp_path):
+    env = _write_env(
+        tmp_path,
+        "API_ID=1\nAPI_HASH=h\nRETENTION_DAYS=3\nRECONCILE_WINDOW_HOURS=12\n",
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "RECONCILE_WINDOW_HOURS" in str(exc.value)
+
+
+def test_reconcile_window_shorter_than_retention_ok_when_reconcile_disabled(tmp_path):
+    env = _write_env(
+        tmp_path,
+        "API_ID=1\nAPI_HASH=h\nRETENTION_DAYS=3\nRECONCILE_WINDOW_HOURS=12\n"
+        "RECONCILE_INTERVAL_MIN=0\n",
+    )
+    cfg = load_config(env)
     assert cfg.reconcile_window_hours == 12
 
 

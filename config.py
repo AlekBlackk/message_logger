@@ -142,10 +142,29 @@ def load_config(env_path: str = ".env") -> Config:
             f"RECONCILE_INTERVAL_MIN must be >= 0, got {reconcile_interval_min}"
         )
 
-    reconcile_window_hours = _as_int(values, "RECONCILE_WINDOW_HOURS", 12)
+    # Default window matches retention: nothing ages out unreconciled unless
+    # the operator explicitly asks for a shorter window (see the check below).
+    raw_reconcile_window = (values.get("RECONCILE_WINDOW_HOURS") or "").strip()
+    reconcile_window_hours = (
+        _as_int(values, "RECONCILE_WINDOW_HOURS", None)
+        if raw_reconcile_window
+        else retention_days * 24
+    )
     if reconcile_window_hours < 1:
         raise ConfigError(
             f"RECONCILE_WINDOW_HOURS must be >= 1, got {reconcile_window_hours}"
+        )
+    # reconcile only checks messages younger than the window (see
+    # Storage.alive_ids); anything older ages past it unchecked and purge()
+    # then deletes the row on schedule — a deletion missed by the live update
+    # stream out there is never reported, silently, with nothing in the logs.
+    if reconcile_interval_min > 0 and reconcile_window_hours < retention_days * 24:
+        raise ConfigError(
+            f"RECONCILE_WINDOW_HOURS ({reconcile_window_hours}) is shorter than "
+            f"RETENTION_DAYS ({retention_days} = {retention_days * 24}h) — deletions "
+            "missed by the live stream on messages older than the window would be "
+            "purged unreported. Raise RECONCILE_WINDOW_HOURS to at least "
+            f"{retention_days * 24}, or lower RETENTION_DAYS."
         )
 
     return Config(

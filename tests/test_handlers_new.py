@@ -24,8 +24,9 @@ class FakeClient:
 
     async def download_media(self, message, file=None):
         self.downloads.append((message, file))
+        size = getattr(getattr(message, "file", None), "size", None) or 4
         with open(file, "wb") as fh:
-            fh.write(b"data")
+            fh.write(b"x" * size)
         return file
 
     async def get_messages(self, _entity, ids=None):
@@ -213,10 +214,11 @@ async def test_row_is_cached_before_media_download(tmp_path):
     logger, client, db = make_logger(tmp_path)
     seen = {}
 
-    async def watching_download(_message, file=None):
+    async def watching_download(message, file=None):
         seen["cached"] = db.find_message(-1001, 5) is not None
+        size = getattr(getattr(message, "file", None), "size", None) or 4
         with open(file, "wb") as fh:
-            fh.write(b"data")
+            fh.write(b"x" * size)
         return file
 
     client.download_media = watching_download
@@ -243,6 +245,29 @@ async def test_backfill_does_not_redownload_cached_message(tmp_path):
     )
 
     assert len(client.downloads) == 1
+    db.close()
+
+
+async def test_truncated_download_discarded(tmp_path):
+    """Source message dying mid-transfer can leave download_media() writing a
+    short file without raising — Telegram then can't decode the re-uploaded
+    result (blurred thumbnail with a load-failure X). A size mismatch is the
+    only local signal; treat it as a failed download, not a stored one."""
+    file = types.SimpleNamespace(size=1024, ext=".jpg", mime_type="image/jpeg")
+    logger, client, db = make_logger(tmp_path)
+
+    async def truncated_download(_message, file=None):
+        with open(file, "wb") as fh:
+            fh.write(b"x" * 10)  # far short of the declared 1024 bytes
+        return file
+
+    client.download_media = truncated_download
+    await logger.on_new_message(fake_event(media=object(), file=file))
+
+    stored = db.find_message(-1001, 5)
+    assert stored.media_path is None
+    assert stored.media_type is not None  # row still remembers "there was media"
+    assert list((tmp_path / "media").rglob("*.jpg")) == []
     db.close()
 
 

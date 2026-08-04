@@ -218,8 +218,25 @@ class MessageLogger:
             await self.client.download_media(message, file=str(target))
         except Exception:
             self.log.exception("failed to download media for message %s", message.id)
+            target.unlink(missing_ok=True)
             return None
-        return str(target), size
+        # Download races the source message's own deletion: if it dies
+        # mid-transfer the file reference can go dead without Telethon
+        # raising, leaving a truncated file on disk that Telegram clients
+        # can't decode. A size mismatch is the only local signal we get —
+        # discard it and let the report fall back to text-only.
+        actual_size = target.stat().st_size if target.exists() else 0
+        if actual_size == 0 or (size and actual_size != size):
+            self.log.warning(
+                "media for message %s incomplete after download (%s of %s bytes) "
+                "— source message likely deleted mid-transfer, discarding",
+                message.id,
+                actual_size,
+                size,
+            )
+            target.unlink(missing_ok=True)
+            return None
+        return str(target), actual_size
 
     async def enforce_media_quota(self) -> None:
         """Evict the oldest downloaded media until MAX_MEDIA_TOTAL_MB is met
@@ -267,6 +284,7 @@ class MessageLogger:
                             media_path,
                             caption=text,
                             parse_mode="html",
+                            supports_streaming=True,
                         )
                     except MediaCaptionTooLongError:
                         self.log.warning(
