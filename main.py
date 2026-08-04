@@ -20,7 +20,7 @@ from storage import Storage
 
 log = logging.getLogger("message_log")
 
-RETENTION_INTERVAL_SEC = 3600
+RETENTION_INTERVAL_SEC = 2 * 86400
 
 
 def setup_logging(cfg: Config) -> None:

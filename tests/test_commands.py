@@ -359,6 +359,25 @@ async def test_purge_confirm_deletes_media_file_from_disk(tmp_path):
     db.close()
 
 
+async def test_purge_confirm_missing_media_file_not_counted_as_removed(tmp_path):
+    """media_path in DB but file already gone from disk (e.g. deleted
+    outside purge) must not be reported as removed — unlink(missing_ok=True)
+    silently no-ops on a missing file, so removed must track pre-unlink
+    existence, not just absence of an exception."""
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    ghost_path = media_dir / "gone.jpg"  # never created
+    db.save_message(
+        make_msg(chat_id=-1001, msg_id=1, date=100, media_path=str(ghost_path))
+    )
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert db.find_message(-1001, 1) is None
+    report = client.sent[-1][1]
+    assert "медиафайлов удалено 0 из 1" in report
+    db.close()
+
+
 async def test_purge_incoming_command_from_other_sender_ignored(tmp_path):
     """A /purge sent by someone else in the log target (out=False) must not
     run — a bypass here would mean irreversible data loss."""

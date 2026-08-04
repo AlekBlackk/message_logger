@@ -234,9 +234,14 @@ class CommandHandler:
         paths = self.storage.purge(cutoff_ts, chat_id)
         removed = 0
         for path in paths:
+            p = Path(path)
+            existed = p.exists()
             try:
-                Path(path).unlink(missing_ok=True)
-                removed += 1
+                p.unlink(missing_ok=True)
+                if existed:
+                    removed += 1
+                else:
+                    log.warning("purge: media already missing: %s", path)
             except OSError as exc:
                 log.warning("purge: cannot delete media %s: %s", path, exc)
         await self.logger.send_report(
