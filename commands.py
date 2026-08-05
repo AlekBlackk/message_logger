@@ -224,14 +224,25 @@ class CommandHandler:
         age_desc = f", за последние {days} дн." if days is not None else ""
 
         count, media_count = self.storage.count_purge_candidates(cutoff_ts, chat_id)
-        if count == 0:
+        orphans = self._find_orphans()
+        orphan_count = len(orphans)
+        orphan_bytes = sum(self._path_size(p) for p in orphans)
+
+        if count == 0 and orphan_count == 0:
             await self.logger.send_report(f"Нечего чистить: {scope_label}{age_desc}.")
             return
+
+        orphan_desc = (
+            f"\nДополнительно {orphan_count} файлов-сирот вне БД "
+            f"({reports._human_size(orphan_bytes)}) — будут удалены вместе с этим."
+            if orphan_count
+            else ""
+        )
 
         if not confirm:
             await self.logger.send_report(
                 f"⚠️ Под удаление попадёт {count} сообщений ({media_count} с медиа) "
-                f"— {scope_label}{age_desc}.\n"
+                f"— {scope_label}{age_desc}.{orphan_desc}\n"
                 "Для удаления повтори команду с confirm в конце."
             )
             return
@@ -249,10 +260,36 @@ class CommandHandler:
                     log.warning("purge: media already missing: %s", path)
             except OSError as exc:
                 log.warning("purge: cannot delete media %s: %s", path, exc)
+
+        orphans_removed = 0
+        for p in orphans:
+            try:
+                p.unlink(missing_ok=True)
+                orphans_removed += 1
+            except OSError as exc:
+                log.warning("purge: cannot delete orphan %s: %s", p, exc)
+        orphan_result = (
+            f", файлов-сирот удалено {orphans_removed} из {orphan_count}"
+            if orphan_count
+            else ""
+        )
         await self.logger.send_report(
             f"✅ Удалено {count} сообщений, медиафайлов удалено {removed} "
-            f"из {media_count} — {scope_label}{age_desc}."
+            f"из {media_count}{orphan_result} — {scope_label}{age_desc}."
         )
+
+    def _find_orphans(self) -> list[Path]:
+        """Media files on disk with no matching media_path in any row —
+        leftovers from purges/retention that ran before this sweep existed."""
+        media_dir = Path(self.config.media_dir)
+        if not media_dir.exists():
+            return []
+        known = self.storage.known_media_paths()
+        return [
+            entry
+            for entry in media_dir.rglob("*")
+            if entry.is_file() and str(entry) not in known
+        ]
 
     async def _list(self) -> None:
         rows = self.storage.list_watch()

@@ -392,6 +392,71 @@ async def test_purge_confirm_missing_media_file_not_counted_as_removed(tmp_path)
     db.close()
 
 
+async def test_purge_dry_run_reports_orphan_files(tmp_path):
+    """A file sitting in media_dir with no matching media_path in any row
+    (leftover from a purge/retention pass that ran before orphan sweeping
+    existed) must show up in the dry-run preview, not just get silently
+    swept on confirm."""
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    (media_dir / "orphan.jpg").write_bytes(b"leftover")
+    now = int(time.time())
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400))
+    await handler.on_command(FakeEvent("/purge 30"))
+    assert "файлов-сирот" in client.sent[-1][1]
+    assert (media_dir / "orphan.jpg").exists()
+    db.close()
+
+
+async def test_purge_confirm_deletes_orphan_files(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    orphan = media_dir / "orphan.jpg"
+    orphan.write_bytes(b"leftover")
+    now = int(time.time())
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400))
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert not orphan.exists()
+    assert "файлов-сирот удалено 1 из 1" in client.sent[-1][1]
+    db.close()
+
+
+async def test_purge_confirm_keeps_media_still_referenced_by_other_rows(tmp_path):
+    """The orphan sweep only removes files with no row anywhere — a file
+    referenced by a row outside the purge scope (e.g. a different chat)
+    must survive."""
+    handler, client, db, _calls = make_handler(
+        tmp_path, entities={"@a": chat_entity(1001, "Chat A")}
+    )
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    kept = media_dir / "kept.jpg"
+    kept.write_bytes(b"still referenced")
+    db.save_message(make_msg(chat_id=-1001, msg_id=1, date=100))
+    db.save_message(make_msg(chat_id=-1002, msg_id=1, date=100, media_path=str(kept)))
+    await handler.on_command(FakeEvent("/purge @a confirm"))
+    assert db.find_message(-1001, 1) is None
+    assert db.find_message(-1002, 1) is not None
+    assert kept.exists()
+    db.close()
+
+
+async def test_purge_zero_candidates_but_orphans_present_still_cleans(tmp_path):
+    """Even when no message rows match the purge scope, leftover orphan
+    files must still be swept rather than short-circuiting on 'Нечего чистить'."""
+    handler, client, db, _calls = make_handler(tmp_path)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    orphan = media_dir / "orphan.jpg"
+    orphan.write_bytes(b"leftover")
+    await handler.on_command(FakeEvent("/purge 30 confirm"))
+    assert not orphan.exists()
+    assert "Нечего" not in client.sent[-1][1]
+    db.close()
+
+
 async def test_purge_incoming_command_from_other_sender_ignored(tmp_path):
     """A /purge sent by someone else in the log target (out=False) must not
     run — a bypass here would mean irreversible data loss."""

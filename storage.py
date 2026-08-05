@@ -319,6 +319,17 @@ class Storage:
         ).fetchone()[0]
         return total, media
 
+    def known_media_paths(self) -> set[str]:
+        """All media_path values still referenced by any row, across every
+        chat. Used to find orphan files on disk — media whose row was
+        already deleted (by a prior purge/retention pass) but whose file
+        was never swept, because that sweep only ever touched paths pulled
+        from the rows it was deleting."""
+        rows = self.conn.execute(
+            "SELECT media_path FROM messages WHERE media_path IS NOT NULL"
+        ).fetchall()
+        return {r["media_path"] for r in rows}
+
     def purge(self, cutoff_ts: int | None, chat_id: int | None) -> list[str]:
         """Drop rows matching the scope, returning media paths to unlink."""
         where, params = self._purge_conditions(cutoff_ts, chat_id)
