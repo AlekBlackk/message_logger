@@ -111,20 +111,25 @@ def build_client(cfg: Config) -> TelegramClient:
     )
 
 
-async def retention_loop(cfg: Config, storage: Storage) -> None:
+async def retention_loop(cfg: Config, storage: Storage, logger: MessageLogger) -> None:
     while True:
         try:
             cutoff = int(time.time()) - cfg.retention_days * 86400
-            paths = storage.purge_older_than(cutoff)
+            rows_purged, paths = storage.purge_older_than(cutoff)
+            removed = 0
             for path in paths:
                 try:
                     Path(path).unlink(missing_ok=True)
+                    removed += 1
                 except OSError as exc:
                     log.warning("cannot delete media %s: %s", path, exc)
-            if paths:
-                log.info("retention: purged %s media files", len(paths))
+            log.info("retention: purged %s rows, %s media files", rows_purged, removed)
+            await logger.send_report(
+                f"🧹 Автоочистка: удалено {rows_purged} сообщений старше "
+                f"{cfg.retention_days} дн., медиафайлов удалено {removed} из {len(paths)}."
+            )
         except Exception:
-            log.exception("retention pass failed")
+            logger.log.exception("retention pass failed")
         await asyncio.sleep(RETENTION_INTERVAL_SEC)
 
 
@@ -281,7 +286,7 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
 
         await backfill(client, logger, cfg, watch_ids, stop)
 
-        background.append(asyncio.create_task(retention_loop(cfg, storage)))
+        background.append(asyncio.create_task(retention_loop(cfg, storage, logger)))
         if cfg.reconcile_interval_min > 0:
             background.append(asyncio.create_task(reconcile_loop(cfg, logger)))
         # Poll rather than awaiting a single future: on Windows the loop must

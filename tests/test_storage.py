@@ -113,8 +113,9 @@ def test_purge_older_than_removes_rows_and_returns_media(tmp_path):
     db.add_edit(-1001, 1, "a", "b", 100)
     db.add_edit(-1001, 3, "a", "b", 500)
 
-    paths = db.purge_older_than(300)
+    rows_purged, paths = db.purge_older_than(300)
 
+    assert rows_purged == 2
     assert paths == ["media/1.jpg"]
     assert db.find_message(-1001, 1) is None
     assert db.find_message(-1001, 2) is None

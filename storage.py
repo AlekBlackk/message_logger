@@ -265,13 +265,16 @@ class Storage:
         ).fetchall()
         return [(r["chat_id"], r["label"], r["added_at"]) for r in rows]
 
-    def purge_older_than(self, cutoff_ts: int) -> list[str]:
-        """Drop rows older than cutoff_ts, returning media paths to unlink."""
+    def purge_older_than(self, cutoff_ts: int) -> tuple[int, list[str]]:
+        """Drop rows older than cutoff_ts, returning (rows purged, media paths to unlink)."""
         rows = self.conn.execute(
             "SELECT media_path FROM messages WHERE date < ? AND media_path IS NOT NULL",
             (cutoff_ts,),
         ).fetchall()
         paths = [r["media_path"] for r in rows]
+        row_count = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE date < ?", (cutoff_ts,)
+        ).fetchone()["n"]
         self.conn.execute(
             "DELETE FROM edits WHERE (chat_id, msg_id) IN "
             "(SELECT chat_id, msg_id FROM messages WHERE date < ?)",
@@ -279,7 +282,7 @@ class Storage:
         )
         self.conn.execute("DELETE FROM messages WHERE date < ?", (cutoff_ts,))
         self.conn.commit()
-        return paths
+        return row_count, paths
 
     def _purge_conditions(
         self, cutoff_ts: int | None, chat_id: int | None
