@@ -12,14 +12,24 @@ def delete_event(deleted_ids, chat_id=None):
     return types.SimpleNamespace(deleted_ids=deleted_ids, chat_id=chat_id)
 
 
-def seed(db, *, chat_id, msg_id, is_channel, text="hello", media_path=None, reply_to_msg_id=None):
+def seed(
+    db,
+    *,
+    chat_id,
+    msg_id,
+    is_channel,
+    text="hello",
+    media_path=None,
+    reply_to_msg_id=None,
+    sender_id=42,
+):
     db.save_message(
         StoredMessage(
             chat_id=chat_id,
             msg_id=msg_id,
             is_channel=is_channel,
             chat_title="My Chat",
-            sender_id=42,
+            sender_id=sender_id,
             sender_name="Alice",
             text=text,
             media_path=media_path,
@@ -103,12 +113,27 @@ async def test_own_report_deletion_is_silent(tmp_path):
     db.close()
 
 
-async def test_batch_deletion_reports_each(tmp_path):
+async def test_batch_deletion_reports_each_sender(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="one", sender_id=42)
+    seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="two", sender_id=43)
+    await logger.on_message_deleted(delete_event([1, 2], chat_id=-1001))
+    assert len(client.sent) == 2
+    db.close()
+
+
+async def test_batch_deletion_same_sender_reports_only_last(tmp_path):
+    """A ban wipes every message the banned user sent in one batch — this
+    must not flood the report with a copy per message, just the last one."""
     logger, client, db = make_logger(tmp_path)
     seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="one")
     seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="two")
     await logger.on_message_deleted(delete_event([1, 2], chat_id=-1001))
-    assert len(client.sent) == 2
+    assert len(client.sent) == 1
+    assert "two" in client.sent[0][1]
+    row1 = db.find_message(-1001, 1)
+    row2 = db.find_message(-1001, 2)
+    assert row1.deleted and row2.deleted
     db.close()
 
 

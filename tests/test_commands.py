@@ -404,7 +404,7 @@ async def test_purge_dry_run_reports_orphan_files(tmp_path):
     now = int(time.time())
     db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400))
     await handler.on_command(FakeEvent("/purge 30"))
-    assert "файлов-сирот" in client.sent[-1][1]
+    assert "файлов вне БД" in client.sent[-1][1]
     assert (media_dir / "orphan.jpg").exists()
     db.close()
 
@@ -419,7 +419,7 @@ async def test_purge_confirm_deletes_orphan_files(tmp_path):
     db.save_message(make_msg(chat_id=-1001, msg_id=1, date=now - 1 * 86400))
     await handler.on_command(FakeEvent("/purge 30 confirm"))
     assert not orphan.exists()
-    assert "файлов-сирот удалено 1 из 1" in client.sent[-1][1]
+    assert "файлов вне БД удалено 1 из 1" in client.sent[-1][1]
     db.close()
 
 

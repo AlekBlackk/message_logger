@@ -427,6 +427,12 @@ class MessageLogger:
         chat_id = event.chat_id  # only channels and supergroups fill this in
         if chat_id is not None and not self.is_tracked(chat_id):
             return
+        # A ban wipes every message the banned user ever sent in one batch —
+        # reporting each would flood the log with duplicates of the same
+        # event, so per sender only the last message is reported; the rest
+        # are marked deleted silently to keep reconcile from resurfacing them.
+        groups: dict[tuple[int, int], list[StoredMessage]] = {}
+        singles: list[StoredMessage] = []
         for msg_id in event.deleted_ids:
             try:
                 stored = self.storage.find_message(chat_id, msg_id)
@@ -446,9 +452,30 @@ class MessageLogger:
                     continue  # duplicate update for the same deletion
                 if not self.is_tracked(stored.chat_id):
                     continue
-                await self.report_deleted(stored, source="live")
+                if stored.sender_id is None:
+                    singles.append(stored)
+                else:
+                    groups.setdefault((stored.chat_id, stored.sender_id), []).append(stored)
             except Exception:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
+        for stored in singles:
+            try:
+                await self.report_deleted(stored, source="live")
+            except Exception:
+                self.log.exception(
+                    "on_message_deleted failed for msg_id %s", stored.msg_id
+                )
+        for batch in groups.values():
+            try:
+                batch.sort(key=lambda s: s.msg_id)
+                *earlier, last = batch
+                for stored in earlier:
+                    self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                await self.report_deleted(last, source="live")
+            except Exception:
+                self.log.exception(
+                    "on_message_deleted failed for msg_id %s", batch[-1].msg_id
+                )
 
     async def on_chat_action(self, event) -> None:
         try:

@@ -233,7 +233,7 @@ class CommandHandler:
             return
 
         orphan_desc = (
-            f"\nДополнительно {orphan_count} файлов-сирот вне БД "
+            f"\nДополнительно {orphan_count} файлов вне БД "
             f"({reports._human_size(orphan_bytes)}) — будут удалены вместе с этим."
             if orphan_count
             else ""
@@ -269,7 +269,7 @@ class CommandHandler:
             except OSError as exc:
                 log.warning("purge: cannot delete orphan %s: %s", p, exc)
         orphan_result = (
-            f", файлов-сирот удалено {orphans_removed} из {orphan_count}"
+            f", файлов вне БД удалено {orphans_removed} из {orphan_count}"
             if orphan_count
             else ""
         )
