@@ -88,11 +88,31 @@ class Storage:
         if "reply_to_msg_id" not in cols:
             self.conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
 
+    # An overwrite refreshes the content columns only. deleted, media_path and
+    # media_size describe what we already know and did about the message, and
+    # the incoming row never carries them — a plain INSERT OR REPLACE would
+    # reset the flag and drop the downloaded file reference. That matters
+    # because catch_up replays NewMessage updates after a reconnect: a replay
+    # of an already-reported deletion would resurrect the row and the next
+    # reconcile pass would report the same deletion again.
+    _UPSERT_SUFFIX = """
+        ON CONFLICT(chat_id, msg_id) DO UPDATE SET
+            is_channel      = excluded.is_channel,
+            chat_title      = excluded.chat_title,
+            sender_id       = excluded.sender_id,
+            sender_name     = excluded.sender_name,
+            text            = excluded.text,
+            media_type      = excluded.media_type,
+            date            = excluded.date,
+            reply_to_msg_id = excluded.reply_to_msg_id
+        WHERE messages.deleted = 0
+    """
+
     def save_message(self, msg: StoredMessage, *, overwrite: bool = True) -> None:
-        verb = "REPLACE" if overwrite else "IGNORE"
+        suffix = self._UPSERT_SUFFIX if overwrite else "ON CONFLICT DO NOTHING"
         self.conn.execute(
-            f"INSERT OR {verb} INTO messages ({_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO messages ({_COLUMNS}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) {suffix}",
             (
                 msg.chat_id,
                 msg.msg_id,

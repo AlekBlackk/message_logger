@@ -80,6 +80,22 @@ def test_save_without_overwrite_keeps_existing_row(tmp_path):
     db.close()
 
 
+def test_overwrite_never_resurrects_a_deleted_row(tmp_path):
+    """catch_up replays NewMessage updates after a reconnect. A replay for a
+    message already reported deleted must not clear the flag — reconcile would
+    otherwise see it alive again and report the same deletion a second time."""
+    db = open_db(tmp_path)
+    db.save_message(make_msg(text="original", media_path="media/10.jpg", media_size=99))
+    db.mark_deleted(-1001, 10)
+    db.save_message(make_msg(text="replayed"))
+    got = db.find_message(-1001, 10)
+    assert got.deleted is True
+    assert got.media_path == "media/10.jpg"
+    assert got.media_size == 99
+    assert db.alive_ids(-1001, 0) == []
+    db.close()
+
+
 def test_mark_deleted(tmp_path):
     db = open_db(tmp_path)
     db.save_message(make_msg())

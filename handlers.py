@@ -136,7 +136,12 @@ class MessageLogger:
         *,
         overwrite: bool = True,
     ) -> None:
-        if not overwrite and self.storage.find_message(peer_id, message.id) is not None:
+        existing = self.storage.find_message(peer_id, message.id)
+        if existing is not None and (not overwrite or existing.deleted):
+            # A row already flagged deleted has been reported and is final:
+            # catch_up replays its NewMessage update after a reconnect, and
+            # re-downloading media over the copy the report was built from
+            # burns rate limit for nothing.
             return
         from_id = getattr(message, "from_id", None)
         sender_id = utils.get_peer_id(from_id) if from_id else None

@@ -230,6 +230,27 @@ async def test_row_is_cached_before_media_download(tmp_path):
     db.close()
 
 
+async def test_replay_of_deleted_message_is_ignored(tmp_path):
+    """catch_up replays NewMessage after a reconnect. A replay for a message
+    already reported deleted must neither clear the flag nor re-download its
+    media over the copy the report was built from."""
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".jpg", mime_type="image/jpeg")
+    event = fake_event(media=object(), file=file)
+
+    await logger.on_new_message(event)
+    original_path = db.find_message(-1001, 5).media_path
+    db.mark_deleted(-1001, 5)
+
+    await logger.on_new_message(event)
+
+    stored = db.find_message(-1001, 5)
+    assert stored.deleted is True
+    assert stored.media_path == original_path
+    assert len(client.downloads) == 1
+    db.close()
+
+
 async def test_backfill_does_not_redownload_cached_message(tmp_path):
     """overwrite=False means the row is already final — re-fetching its media
     would burn rate limit for a file that is on disk already."""
