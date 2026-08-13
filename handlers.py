@@ -438,6 +438,7 @@ class MessageLogger:
         # are marked deleted silently to keep reconcile from resurfacing them.
         groups: dict[tuple[int, int], list[StoredMessage]] = {}
         singles: list[StoredMessage] = []
+        candidates: list[StoredMessage] = []
         for msg_id in event.deleted_ids:
             try:
                 stored = self.storage.find_message(chat_id, msg_id)
@@ -457,12 +458,23 @@ class MessageLogger:
                     continue  # duplicate update for the same deletion
                 if not self.is_tracked(stored.chat_id):
                     continue
-                if stored.sender_id is None:
-                    singles.append(stored)
-                else:
-                    groups.setdefault((stored.chat_id, stored.sender_id), []).append(stored)
+                candidates.append(stored)
             except Exception:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
+        # Deleting a channel post cascades into Telegram deleting the whole
+        # discussion-group comment thread under it in the same batch — those
+        # comments are collateral, not something anyone deleted on purpose,
+        # so they're marked deleted silently instead of each spawning its own
+        # report.
+        batch_ids = {stored.msg_id for stored in candidates}
+        for stored in candidates:
+            if stored.reply_to_msg_id in batch_ids:
+                self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                continue
+            if stored.sender_id is None:
+                singles.append(stored)
+            else:
+                groups.setdefault((stored.chat_id, stored.sender_id), []).append(stored)
         for stored in singles:
             try:
                 await self.report_deleted(stored, source="live")

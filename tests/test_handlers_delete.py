@@ -251,6 +251,24 @@ async def test_deletion_report_omits_reply_context_when_parent_uncached(tmp_path
     db.close()
 
 
+async def test_batch_deletion_suppresses_comments_of_deleted_post(tmp_path):
+    """Deleting a channel post cascades into Telegram deleting its discussion-
+    group comments in the same batch — those comments must be marked deleted
+    silently, not reported one by one, only the post itself is reported."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="the post", sender_id=None)
+    seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="comment one",
+         reply_to_msg_id=1, sender_id=42)
+    seed(db, chat_id=-1001, msg_id=3, is_channel=True, text="comment two",
+         reply_to_msg_id=1, sender_id=43)
+    await logger.on_message_deleted(delete_event([1, 2, 3], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "the post" in client.sent[0][1]
+    assert db.find_message(-1001, 2).deleted is True
+    assert db.find_message(-1001, 3).deleted is True
+    db.close()
+
+
 async def test_batch_with_missing_and_present(tmp_path):
     """One id in the batch was never cached; the other was — the cached one
     must still be reported."""
