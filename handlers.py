@@ -27,6 +27,10 @@ RECONCILE_PAUSE_SEC = 1.0
 # A blind spot can hide hundreds of deletions; draining them all in one pass
 # would trip FloodWait on the log target. The rest waits for the next pass.
 RECONCILE_MAX_REPORTS = 30
+# One delete event can hit many senders at once (mass anti-spam cleanup);
+# past this many reports the rest are marked deleted without a report to keep
+# the log target from a FloodWait burst.
+BATCH_REPORT_LIMIT = 10
 
 
 class MessageLogger:
@@ -434,7 +438,7 @@ class MessageLogger:
             return
         # A ban wipes every message the banned user ever sent in one batch —
         # reporting each would flood the log with duplicates of the same
-        # event, so per sender only the last message is reported; the rest
+        # event, so per sender only the newest message is reported; the rest
         # are marked deleted silently to keep reconcile from resurfacing them.
         groups: dict[tuple[int, int], list[StoredMessage]] = {}
         singles: list[StoredMessage] = []
@@ -475,23 +479,45 @@ class MessageLogger:
                 singles.append(stored)
             else:
                 groups.setdefault((stored.chat_id, stored.sender_id), []).append(stored)
-        for stored in singles:
+        # Collapse each sender's batch to its newest message (by date, not by
+        # id — forwards and slow mode can reorder ids); the rest go silent.
+        reportable: list[StoredMessage] = list(singles)
+        for batch in groups.values():
+            try:
+                batch.sort(key=lambda s: (s.date, s.msg_id))
+                *earlier, newest = batch
+                for stored in earlier:
+                    self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                reportable.append(newest)
+            except Exception:
+                self.log.exception(
+                    "on_message_deleted failed for msg_id %s", batch[-1].msg_id
+                )
+
+        # Newest deletion first, so the freshest report sits at the top of the log.
+        reportable.sort(key=lambda s: (s.date, s.msg_id), reverse=True)
+        over_cap = reportable[BATCH_REPORT_LIMIT:]
+        for stored in over_cap:
+            try:
+                self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+            except Exception:
+                self.log.exception(
+                    "on_message_deleted failed for msg_id %s", stored.msg_id
+                )
+        if over_cap:
+            self.log.warning(
+                "on_message_deleted: %s deletion(s) over the per-event cap of "
+                "%s marked deleted without a report",
+                len(over_cap),
+                BATCH_REPORT_LIMIT,
+            )
+
+        for stored in reportable[:BATCH_REPORT_LIMIT]:
             try:
                 await self.report_deleted(stored, source="live")
             except Exception:
                 self.log.exception(
                     "on_message_deleted failed for msg_id %s", stored.msg_id
-                )
-        for batch in groups.values():
-            try:
-                batch.sort(key=lambda s: s.msg_id)
-                *earlier, last = batch
-                for stored in earlier:
-                    self.storage.mark_deleted(stored.chat_id, stored.msg_id)
-                await self.report_deleted(last, source="live")
-            except Exception:
-                self.log.exception(
-                    "on_message_deleted failed for msg_id %s", batch[-1].msg_id
                 )
 
     async def on_chat_action(self, event) -> None:

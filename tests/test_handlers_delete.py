@@ -22,6 +22,7 @@ def seed(
     media_path=None,
     reply_to_msg_id=None,
     sender_id=42,
+    date=1700000000,
 ):
     db.save_message(
         StoredMessage(
@@ -34,7 +35,7 @@ def seed(
             text=text,
             media_path=media_path,
             media_type="MessageMediaPhoto" if media_path else None,
-            date=1700000000,
+            date=date,
             deleted=False,
             reply_to_msg_id=reply_to_msg_id,
         )
@@ -134,6 +135,67 @@ async def test_batch_deletion_same_sender_reports_only_last(tmp_path):
     row1 = db.find_message(-1001, 1)
     row2 = db.find_message(-1001, 2)
     assert row1.deleted and row2.deleted
+    db.close()
+
+
+async def test_batch_same_sender_reports_newest_by_date(tmp_path):
+    """The one report kept for a banned user is their newest message by date —
+    not simply the highest message id (forwards and slow mode can reorder)."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="old", date=1000)
+    seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="the newest", date=3000)
+    seed(db, chat_id=-1001, msg_id=3, is_channel=True, text="middle", date=2000)
+    await logger.on_message_deleted(delete_event([1, 2, 3], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "the newest" in client.sent[0][1]
+    assert db.find_message(-1001, 1).deleted is True
+    assert db.find_message(-1001, 3).deleted is True
+    db.close()
+
+
+async def test_batch_multiple_senders_reported_newest_first(tmp_path):
+    """Several senders hit in one delete event: reports go out newest → oldest
+    so the freshest sits at the top of the log."""
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=1, is_channel=True, text="older alice",
+         sender_id=42, date=5000)
+    seed(db, chat_id=-1001, msg_id=2, is_channel=True, text="newer bob",
+         sender_id=43, date=9000)
+    await logger.on_message_deleted(delete_event([1, 2], chat_id=-1001))
+    assert len(client.sent) == 2
+    assert "newer bob" in client.sent[0][1]
+    assert "older alice" in client.sent[1][1]
+    db.close()
+
+
+async def test_batch_over_report_cap_keeps_newest_and_silences_rest(tmp_path):
+    """A single delete event hitting more senders than the cap: only the cap's
+    worth of reports go out (newest first), the rest are marked deleted without
+    a report so reconcile stays quiet."""
+    logger, client, db = make_logger(tmp_path)
+    for i in range(1, 14):  # 13 senders, date ascending with id
+        seed(db, chat_id=-1001, msg_id=i, is_channel=True, text=f"msg{i}",
+             sender_id=i, date=1000 + i)
+    await logger.on_message_deleted(delete_event(list(range(1, 14)), chat_id=-1001))
+    assert len(client.sent) == 10
+    assert "msg13" in client.sent[0][1]
+    assert "msg4" in client.sent[9][1]
+    for i in (1, 2, 3):
+        assert db.find_message(-1001, i).deleted is True
+    db.close()
+
+
+async def test_batch_over_report_cap_logs_warning(tmp_path, caplog):
+    import logging
+
+    logger, _client, db = make_logger(tmp_path)
+    for i in range(1, 13):
+        seed(db, chat_id=-1001, msg_id=i, is_channel=True, sender_id=i, date=1000 + i)
+    with caplog.at_level(logging.WARNING, logger="handlers"):
+        await logger.on_message_deleted(delete_event(list(range(1, 13)), chat_id=-1001))
+    assert any(
+        "cap" in r.message and r.levelname == "WARNING" for r in caplog.records
+    )
     db.close()
 
 
