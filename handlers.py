@@ -27,9 +27,9 @@ RECONCILE_PAUSE_SEC = 1.0
 # A blind spot can hide hundreds of deletions; draining them all in one pass
 # would trip FloodWait on the log target. The rest waits for the next pass.
 RECONCILE_MAX_REPORTS = 30
-# One delete event can hit many senders at once (mass anti-spam cleanup);
-# past this many reports the rest are marked deleted without a report to keep
-# the log target from a FloodWait burst.
+# One delete event can carry hundreds of messages at once (a ban wipes every
+# message the user ever sent); past this many reports the rest are marked
+# deleted without a report to keep the log target from a FloodWait burst.
 BATCH_REPORT_LIMIT = 10
 
 
@@ -436,12 +436,6 @@ class MessageLogger:
         chat_id = event.chat_id  # only channels and supergroups fill this in
         if chat_id is not None and not self.is_tracked(chat_id):
             return
-        # A ban wipes every message the banned user ever sent in one batch —
-        # reporting each would flood the log with duplicates of the same
-        # event, so per sender only the newest message is reported; the rest
-        # are marked deleted silently to keep reconcile from resurfacing them.
-        groups: dict[tuple[int, int], list[StoredMessage]] = {}
-        singles: list[StoredMessage] = []
         candidates: list[StoredMessage] = []
         for msg_id in event.deleted_ids:
             try:
@@ -467,32 +461,19 @@ class MessageLogger:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
         # Deleting a channel post cascades into Telegram deleting the whole
         # discussion-group comment thread under it in the same batch — those
-        # comments are collateral, not something anyone deleted on purpose,
-        # so they're marked deleted silently instead of each spawning its own
-        # report.
-        batch_ids = {stored.msg_id for stored in candidates}
+        # comments are collateral, not something anyone deleted on purpose, so
+        # they're marked deleted silently instead of each spawning a report. The
+        # tell is a reply to another message in the same batch from a *different*
+        # author; a banned user's replies to their own earlier messages share a
+        # sender and stay reported.
+        by_id = {stored.msg_id: stored for stored in candidates}
+        reportable: list[StoredMessage] = []
         for stored in candidates:
-            if stored.reply_to_msg_id in batch_ids:
+            parent = by_id.get(stored.reply_to_msg_id) if stored.reply_to_msg_id else None
+            if parent is not None and parent.sender_id != stored.sender_id:
                 self.storage.mark_deleted(stored.chat_id, stored.msg_id)
-                continue
-            if stored.sender_id is None:
-                singles.append(stored)
             else:
-                groups.setdefault((stored.chat_id, stored.sender_id), []).append(stored)
-        # Collapse each sender's batch to its newest message (by date, not by
-        # id — forwards and slow mode can reorder ids); the rest go silent.
-        reportable: list[StoredMessage] = list(singles)
-        for batch in groups.values():
-            try:
-                batch.sort(key=lambda s: (s.date, s.msg_id))
-                *earlier, newest = batch
-                for stored in earlier:
-                    self.storage.mark_deleted(stored.chat_id, stored.msg_id)
-                reportable.append(newest)
-            except Exception:
-                self.log.exception(
-                    "on_message_deleted failed for msg_id %s", batch[-1].msg_id
-                )
+                reportable.append(stored)
 
         # Newest deletion first, so the freshest report sits at the top of the log.
         reportable.sort(key=lambda s: (s.date, s.msg_id), reverse=True)
