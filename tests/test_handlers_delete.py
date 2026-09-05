@@ -28,6 +28,7 @@ def seed(
     reply_to_msg_id=None,
     sender_id=42,
     date=1700000000,
+    deleted=False,
 ):
     db.save_message(
         StoredMessage(
@@ -41,7 +42,7 @@ def seed(
             media_path=media_path,
             media_type="MessageMediaPhoto" if media_path else None,
             date=date,
-            deleted=False,
+            deleted=deleted,
             reply_to_msg_id=reply_to_msg_id,
         )
     )
@@ -341,3 +342,185 @@ async def test_batch_with_missing_and_present(tmp_path):
     assert len(client.sent) == 1
     assert "present" in client.sent[0][1]
     db.close()
+
+
+async def test_batch_deletion_suppresses_reply_when_parent_recently_deleted(tmp_path):
+    """If a parent message was deleted in a preceding chunk of a ban cascade,
+    a reply to it by a different user in a subsequent delete batch is collateral
+    and must be marked deleted silently."""
+    logger, client, db = make_logger(tmp_path)
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="parent from yesterday",
+        sender_id=99,
+        date=1700000000 - 86400,
+        deleted=True,
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=2,
+        is_channel=True,
+        text="reply from yesterday",
+        sender_id=42,
+        reply_to_msg_id=1,
+        date=1700000000 - 86400,
+        deleted=False,
+    )
+    logger.record_deletion(-1001, 1)
+    await logger.on_message_deleted(delete_event([2], chat_id=-1001))
+    assert client.sent == []
+    assert db.find_message(-1001, 2).deleted is True
+    db.close()
+
+
+async def test_batch_deletion_reports_reply_when_parent_deleted_long_ago(tmp_path):
+    """If a parent message was deleted in the past (not part of the current cascade),
+    a user deleting their own reply is an intentional deletion and must be reported."""
+    logger, client, db = make_logger(tmp_path)
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="old deleted parent",
+        sender_id=99,
+        date=1700000000 - 86400,
+        deleted=True,
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=2,
+        is_channel=True,
+        text="my reply",
+        sender_id=42,
+        reply_to_msg_id=1,
+        date=1700000000 - 86400,
+        deleted=False,
+    )
+    await logger.on_message_deleted(delete_event([2], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "my reply" in client.sent[0][1]
+    assert db.find_message(-1001, 2).deleted is True
+    db.close()
+
+
+async def test_batch_deletion_suppresses_reply_to_banned_user_from_previous_day(tmp_path):
+    """When a banned user's messages are wiped, replies to their earlier messages
+    (even if the parent was on the previous day and not in by_id) are suppressed,
+    while the banned user's own messages are reported."""
+    logger, client, db = make_logger(tmp_path)
+    # Banned user's post from yesterday
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="banned user yesterday",
+        sender_id=99,
+        date=1700000000 - 86400,
+    )
+    # Victim's reply from yesterday
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=2,
+        is_channel=True,
+        text="victim reply yesterday",
+        sender_id=42,
+        reply_to_msg_id=1,
+        date=1700000000 - 86400,
+    )
+    # Banned user's post today
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=3,
+        is_channel=True,
+        text="banned user today",
+        sender_id=99,
+        date=1700000000,
+    )
+    # Batch deletes today's banned user message (3) and the reply (2)
+    await logger.on_message_deleted(delete_event([3, 2], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "banned user today" in client.sent[0][1]
+    assert db.find_message(-1001, 2).deleted is True
+    assert db.find_message(-1001, 3).deleted is True
+    db.close()
+
+
+async def test_batch_deletion_reports_manual_reply_deletion_when_parent_alive(tmp_path):
+    """If the parent message is still alive (not deleted), a user deleting their own
+    reply is an intentional deletion and must be reported."""
+    logger, client, db = make_logger(tmp_path)
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="living parent",
+        sender_id=99,
+        deleted=False,
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=2,
+        is_channel=True,
+        text="my reply",
+        sender_id=42,
+        reply_to_msg_id=1,
+        deleted=False,
+    )
+    await logger.on_message_deleted(delete_event([2], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "my reply" in client.sent[0][1]
+    assert db.find_message(-1001, 2).deleted is True
+    db.close()
+
+
+async def test_batch_deletion_suppresses_multi_level_reply_chain(tmp_path):
+    """A banned user's post has a reply from user B, which in turn has a reply
+    from user C. Both replies are collateral and must be suppressed."""
+    logger, client, db = make_logger(tmp_path)
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="banned user root",
+        sender_id=99,
+        date=1700000000,
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=2,
+        is_channel=True,
+        text="reply by bob",
+        sender_id=42,
+        reply_to_msg_id=1,
+        date=1700000001,
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=3,
+        is_channel=True,
+        text="reply by charlie to bob",
+        sender_id=43,
+        reply_to_msg_id=2,
+        date=1700000002,
+    )
+    await logger.on_message_deleted(delete_event([1, 2, 3], chat_id=-1001))
+    assert len(client.sent) == 1
+    assert "banned user root" in client.sent[0][1]
+    assert db.find_message(-1001, 2).deleted is True
+    assert db.find_message(-1001, 3).deleted is True
+    db.close()
+

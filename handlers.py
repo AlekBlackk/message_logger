@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from telethon import events, utils
@@ -31,6 +32,10 @@ RECONCILE_MAX_REPORTS = 30
 # message the user ever sent); past this many reports the rest are marked
 # deleted without a report to keep the log target from a FloodWait burst.
 BATCH_REPORT_LIMIT = 10
+# Telegram cascades ban/post deletions into comment/reply threads across
+# multiple chunks or updates. Replies deleted within this window of their
+# parent are considered collateral damage rather than intentional deletions.
+CASCADE_WINDOW_SEC = 60.0
 
 
 class MessageLogger:
@@ -56,6 +61,25 @@ class MessageLogger:
         self._titles: dict[int, str] = {}
         self._usernames: dict[int, str] = {}
         self._sender_usernames: dict[int, str] = {}
+        self.recent_deletions: dict[tuple[int, int], float] = {}
+
+    def record_deletion(self, chat_id: int, msg_id: int) -> None:
+        now = time.time()
+        self.recent_deletions[(chat_id, msg_id)] = now
+        cutoff = now - CASCADE_WINDOW_SEC
+        self.recent_deletions = {
+            k: ts for k, ts in self.recent_deletions.items() if ts >= cutoff
+        }
+
+    def is_recently_deleted(self, chat_id: int, msg_id: int) -> bool:
+        now = time.time()
+        ts = self.recent_deletions.get((chat_id, msg_id))
+        if ts is None:
+            return False
+        if now - ts > CASCADE_WINDOW_SEC:
+            del self.recent_deletions[(chat_id, msg_id)]
+            return False
+        return True
 
     # --- wiring -----------------------------------------------------------
 
@@ -415,6 +439,7 @@ class MessageLogger:
         )
         if sent:
             self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+            self.record_deletion(stored.chat_id, stored.msg_id)
             self.log.info(
                 "deletion reported (%s): chat [%s] msg %s: %r",
                 source,
@@ -459,19 +484,40 @@ class MessageLogger:
                 candidates.append(stored)
             except Exception:
                 self.log.exception("on_message_deleted failed for msg_id %s", msg_id)
-        # Deleting a channel post cascades into Telegram deleting the whole
-        # discussion-group comment thread under it in the same batch — those
-        # comments are collateral, not something anyone deleted on purpose, so
-        # they're marked deleted silently instead of each spawning a report. The
-        # tell is a reply to another message in the same batch from a *different*
-        # author; a banned user's replies to their own earlier messages share a
-        # sender and stay reported.
+        # Deleting a channel post or banning a user cascades into Telegram deleting
+        # the whole discussion-group comment thread / replies under it (either in
+        # the same batch, across multiple chunks, or for messages from previous
+        # days) — those replies are collateral, not something anyone deleted on
+        # purpose, so they're marked deleted silently instead of each spawning a
+        # report. The tell is a reply to a deleted parent (in this batch, recently
+        # deleted in an earlier chunk of the cascade, or authored by a sender whose
+        # messages are wiped) from a *different* author; a banned user's replies
+        # to their own earlier messages share a sender and stay reported.
         by_id = {stored.msg_id: stored for stored in candidates}
+        candidates_senders = {
+            stored.sender_id for stored in candidates if stored.sender_id is not None
+        }
         reportable: list[StoredMessage] = []
         for stored in candidates:
-            parent = by_id.get(stored.reply_to_msg_id) if stored.reply_to_msg_id else None
-            if parent is not None and parent.sender_id != stored.sender_id:
+            parent = (
+                by_id.get(stored.reply_to_msg_id)
+                if stored.reply_to_msg_id
+                else None
+            )
+            if parent is None and stored.reply_to_msg_id:
+                parent = self.storage.find_message(stored.chat_id, stored.reply_to_msg_id)
+
+            if (
+                parent is not None
+                and parent.sender_id != stored.sender_id
+                and (
+                    parent.msg_id in by_id
+                    or self.is_recently_deleted(stored.chat_id, parent.msg_id)
+                    or (parent.sender_id is not None and parent.sender_id in candidates_senders)
+                )
+            ):
                 self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                self.record_deletion(stored.chat_id, stored.msg_id)
             else:
                 reportable.append(stored)
 
@@ -481,6 +527,7 @@ class MessageLogger:
         for stored in over_cap:
             try:
                 self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                self.record_deletion(stored.chat_id, stored.msg_id)
             except Exception:
                 self.log.exception(
                     "on_message_deleted failed for msg_id %s", stored.msg_id
@@ -589,6 +636,7 @@ class MessageLogger:
     async def reconcile_chat(self, chat_id: int, since_ts: int, budget: int) -> int:
         reported = 0
         ids = self.storage.alive_ids(chat_id, since_ts)
+        reconciled_deleted: set[int] = set()
         for start in range(0, len(ids), RECONCILE_CHUNK):
             if reported >= budget:
                 break
@@ -604,13 +652,28 @@ class MessageLogger:
             for msg_id, message in zip(chunk, fetched):
                 if message is not None:
                     continue  # still there
-                if reported >= budget:
-                    break
                 stored = self.storage.find_message(chat_id, msg_id)
                 if stored is None or stored.deleted:
                     continue
+                if stored.reply_to_msg_id:
+                    parent = self.storage.find_message(chat_id, stored.reply_to_msg_id)
+                    if (
+                        parent is not None
+                        and parent.sender_id != stored.sender_id
+                        and (
+                            parent.msg_id in reconciled_deleted
+                            or self.is_recently_deleted(chat_id, parent.msg_id)
+                        )
+                    ):
+                        self.storage.mark_deleted(stored.chat_id, stored.msg_id)
+                        self.record_deletion(stored.chat_id, stored.msg_id)
+                        reconciled_deleted.add(stored.msg_id)
+                        continue
+                if reported >= budget:
+                    break
                 if await self.report_deleted(stored, source="reconcile"):
                     reported += 1
+                    reconciled_deleted.add(stored.msg_id)
                 await asyncio.sleep(RECONCILE_PAUSE_SEC)
             await asyncio.sleep(RECONCILE_PAUSE_SEC)
         return reported
