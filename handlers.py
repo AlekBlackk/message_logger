@@ -15,6 +15,7 @@ from telethon.errors import (
     MediaCaptionTooLongError,
     PhotoInvalidDimensionsError,
 )
+from telethon.tl.types import DocumentAttributeAnimated
 
 import reports
 from config import Config
@@ -36,6 +37,8 @@ BATCH_REPORT_LIMIT = 10
 # multiple chunks or updates. Replies deleted within this window of their
 # parent are considered collateral damage rather than intentional deletions.
 CASCADE_WINDOW_SEC = 60.0
+# Upper bound for waiting on in-flight media download when a deletion arrives.
+DOWNLOAD_TIMEOUT_SEC = 30.0
 
 
 class MessageLogger:
@@ -62,6 +65,7 @@ class MessageLogger:
         self._usernames: dict[int, str] = {}
         self._sender_usernames: dict[int, str] = {}
         self.recent_deletions: dict[tuple[int, int], float] = {}
+        self._inflight_downloads: dict[tuple[int, int], asyncio.Event] = {}
 
     def record_deletion(self, chat_id: int, msg_id: int) -> None:
         now = time.time()
@@ -196,13 +200,23 @@ class MessageLogger:
         self.storage.save_message(row, overwrite=overwrite)
         if media_type is None:
             return
-        downloaded = await self.fetch_media(message, peer_id, chat_title)
-        if downloaded is None:
+        download_key = (peer_id, message.id)
+        if download_key in self._inflight_downloads:
+            await self._inflight_downloads[download_key].wait()
             return
-        media_path, media_size = downloaded
-        self.storage.update_media_path(peer_id, message.id, media_path, media_size)
-        if self.config.max_media_total_bytes > 0:
-            await self.enforce_media_quota()
+        event = asyncio.Event()
+        self._inflight_downloads[download_key] = event
+        try:
+            downloaded = await self.fetch_media(message, peer_id, chat_title)
+            if downloaded is None:
+                return
+            media_path, media_size = downloaded
+            self.storage.update_media_path(peer_id, message.id, media_path, media_size)
+            if self.config.max_media_total_bytes > 0:
+                await self.enforce_media_quota()
+        finally:
+            event.set()
+            self._inflight_downloads.pop(download_key, None)
 
     @staticmethod
     def _media_label(message) -> str:
@@ -210,12 +224,12 @@ class MessageLogger:
         (raw media class name doesn't tell a video apart from a plain file)."""
         for attr, label in (
             ("photo", "фото"),
-            ("video", "видео"),
+            ("sticker", "стикер"),
+            ("gif", "гиф"),
             ("video_note", "видеосообщение"),
             ("voice", "голосовое"),
             ("audio", "аудио"),
-            ("sticker", "стикер"),
-            ("gif", "гиф"),
+            ("video", "видео"),
             ("document", "файл"),
         ):
             if getattr(message, attr, None) is not None:
@@ -307,17 +321,28 @@ class MessageLogger:
 
     # --- sending ----------------------------------------------------------
 
-    async def send_report(self, text: str, media_path: str | None = None) -> bool:
+    async def send_report(
+        self,
+        text: str,
+        media_path: str | None = None,
+        *,
+        media_type: str | None = None,
+    ) -> bool:
         for attempt in (1, 2):
             try:
                 if media_path and os.path.exists(media_path):
+                    send_kw: dict = {
+                        "caption": text,
+                        "parse_mode": "html",
+                        "supports_streaming": True,
+                    }
+                    if media_type and media_type.lower() in ("гиф", "gif"):
+                        send_kw["attributes"] = [DocumentAttributeAnimated()]
                     try:
                         await self.client.send_file(
                             self.log_target_id,
                             media_path,
-                            caption=text,
-                            parse_mode="html",
-                            supports_streaming=True,
+                            **send_kw,
                         )
                     except MediaCaptionTooLongError:
                         self.log.warning(
@@ -334,12 +359,13 @@ class MessageLogger:
                             "photo dimensions rejected, resending %s as a document",
                             media_path,
                         )
+                        doc_kw = dict(send_kw)
+                        doc_kw.pop("supports_streaming", None)
+                        doc_kw["force_document"] = True
                         await self.client.send_file(
                             self.log_target_id,
                             media_path,
-                            caption=text,
-                            parse_mode="html",
-                            force_document=True,
+                            **doc_kw,
                         )
                 else:
                     await self.client.send_message(
@@ -421,10 +447,43 @@ class MessageLogger:
         except Exception:
             self.log.exception("on_message_edited failed")
 
+    async def _wait_inflight_download(
+        self, chat_id: int, msg_id: int, timeout: float | None = None
+    ) -> None:
+        """Wait for any active background media download for this message to
+        finish before building or sending a deletion report."""
+        event = self._inflight_downloads.get((chat_id, msg_id))
+        if event is None:
+            return
+        effective_timeout = (
+            timeout if timeout is not None else DOWNLOAD_TIMEOUT_SEC
+        )
+        try:
+            await asyncio.wait_for(event.wait(), timeout=effective_timeout)
+        except asyncio.TimeoutError:
+            self.log.warning(
+                "timed out waiting for media download of chat [%s] msg %s",
+                self.chat_label(chat_id),
+                msg_id,
+            )
+        except Exception:
+            self.log.exception(
+                "error waiting for media download of chat [%s] msg %s",
+                self.chat_label(chat_id),
+                msg_id,
+            )
+
     async def report_deleted(self, stored: StoredMessage, *, source: str) -> bool:
         """Send one deletion report. The row is marked deleted only once the
         report is out, so a failed send is retried by the next reconcile pass
         instead of being silently swallowed."""
+        await self._wait_inflight_download(stored.chat_id, stored.msg_id)
+        refreshed = self.storage.find_message(stored.chat_id, stored.msg_id)
+        if refreshed is not None:
+            if refreshed.deleted:
+                # Already reported by a concurrent pass while waiting for download
+                return False
+            stored = refreshed
         sent = await self.send_report(
             reports.format_deleted(
                 stored,
@@ -433,6 +492,7 @@ class MessageLogger:
                 reply_preview=self.reply_preview(stored.chat_id, stored.reply_to_msg_id),
             ),
             media_path=stored.media_path,
+            media_type=stored.media_type,
         )
         preview = reports.truncate(stored.text, 80) or (
             f"[{stored.media_type}]" if stored.media_type else ""

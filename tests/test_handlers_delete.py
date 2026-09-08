@@ -524,3 +524,344 @@ async def test_batch_deletion_suppresses_multi_level_reply_chain(tmp_path):
     assert db.find_message(-1001, 3).deleted is True
     db.close()
 
+
+async def test_deletion_waits_for_inflight_download_and_attaches_media(tmp_path):
+    import asyncio
+    from tests.test_handlers_new import fake_event
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=10, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+
+    async def slow_download(message, file=None):
+        download_started.set()
+        await release_download.wait()
+        with open(file, "wb") as fh:
+            fh.write(b"x" * 1024)
+        return file
+
+    client.download_media = slow_download
+
+    # Start message ingestion in background — fetch_media will pause
+    new_task = asyncio.create_task(logger.on_new_message(event))
+    await download_started.wait()
+
+    # The row exists in DB, but media_path is None yet
+    stored_before = db.find_message(-1001, 10)
+    assert stored_before is not None
+    assert stored_before.media_path is None
+
+    # Deletion event arrives while download is still running
+    del_task = asyncio.create_task(logger.on_message_deleted(delete_event([10], chat_id=-1001)))
+    await asyncio.sleep(0.02)
+
+    # Deletion has not sent report yet because it is waiting for download
+    assert client.sent == []
+    assert client.files == []
+
+    # Now allow download to finish
+    release_download.set()
+    await new_task
+    await del_task
+
+    # Report must be sent WITH media file, not text-only
+    assert client.sent == []
+    assert len(client.files) == 1
+    _target, sent_path, kw = client.files[0]
+    assert "10.mp4" in sent_path
+    assert db.find_message(-1001, 10).deleted is True
+    db.close()
+
+
+async def test_deletion_inflight_download_timeout(tmp_path, monkeypatch):
+    import asyncio
+    import handlers
+    from tests.test_handlers_new import fake_event
+
+    monkeypatch.setattr(handlers, "DOWNLOAD_TIMEOUT_SEC", 0.05)
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=11, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+
+    async def hung_download(message, file=None):
+        download_started.set()
+        await release_download.wait()
+
+    client.download_media = hung_download
+
+    new_task = asyncio.create_task(logger.on_new_message(event))
+    await download_started.wait()
+
+    # Deletion arrives, timeout should trigger and send text-only report without hanging
+    del_task = asyncio.create_task(logger.on_message_deleted(delete_event([11], chat_id=-1001)))
+    await del_task
+
+    assert len(client.sent) == 1
+    assert client.files == []
+    assert db.find_message(-1001, 11).deleted is True
+
+    # Cleanup hanging task
+    release_download.set()
+    await new_task
+    db.close()
+
+
+async def test_deletion_inflight_download_error(tmp_path):
+    import asyncio
+    from tests.test_handlers_new import fake_event
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=12, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+
+    async def failing_download(message, file=None):
+        download_started.set()
+        await release_download.wait()
+        raise RuntimeError("network down")
+
+    client.download_media = failing_download
+
+    new_task = asyncio.create_task(logger.on_new_message(event))
+    await download_started.wait()
+
+    del_task = asyncio.create_task(logger.on_message_deleted(delete_event([12], chat_id=-1001)))
+    release_download.set()
+
+    await new_task
+    await del_task
+
+    assert len(client.sent) == 1
+    assert client.files == []
+    assert db.find_message(-1001, 12).deleted is True
+    db.close()
+
+
+async def test_deletion_gif_includes_animated_attribute(tmp_path):
+    from telethon.tl.types import DocumentAttributeAnimated
+
+    media = tmp_path / "anim.mp4"
+    media.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+    db.save_message(
+        StoredMessage(
+            chat_id=-1001,
+            msg_id=15,
+            is_channel=True,
+            chat_title="My Chat",
+            sender_id=42,
+            sender_name="Alice",
+            text="funny gif",
+            media_path=str(media),
+            media_type="гиф",
+            date=1700000000,
+            deleted=False,
+            reply_to_msg_id=None,
+        )
+    )
+    await logger.on_message_deleted(delete_event([15], chat_id=-1001))
+    assert len(client.files) == 1
+    _target, _file, kw = client.files[0]
+    attrs = kw.get("attributes")
+    assert attrs is not None
+    assert any(isinstance(a, DocumentAttributeAnimated) for a in attrs)
+    db.close()
+
+
+async def test_deletion_mixed_batch_one_timeout_one_success(tmp_path, monkeypatch):
+    import asyncio
+    import handlers
+    from tests.test_handlers_new import fake_event
+
+    monkeypatch.setattr(handlers, "DOWNLOAD_TIMEOUT_SEC", 0.05)
+
+    logger, client, db = make_logger(tmp_path)
+    file1 = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    file2 = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    ev1 = fake_event(msg_id=21, media=object(), file=file1)
+    ev2 = fake_event(msg_id=22, media=object(), file=file2)
+
+    download21_started = asyncio.Event()
+    release21 = asyncio.Event()
+
+    async def mixed_download(message, file=None):
+        if message.id == 21:
+            download21_started.set()
+            await release21.wait()
+            with open(file, "wb") as fh:
+                fh.write(b"1" * 1024)
+            return file
+        with open(file, "wb") as fh:
+            fh.write(b"2" * 1024)
+        return file
+
+    client.download_media = mixed_download
+
+    task21 = asyncio.create_task(logger.on_new_message(ev1))
+    await download21_started.wait()
+
+    # msg 22 finishes download immediately
+    await logger.on_new_message(ev2)
+
+    # Batch deletion containing both 21 (hanging) and 22 (ready)
+    del_task = asyncio.create_task(
+        logger.on_message_deleted(delete_event([21, 22], chat_id=-1001))
+    )
+    await del_task
+
+    # 21 timed out -> text report; 22 succeeded -> media file report
+    assert len(client.sent) == 1
+    assert len(client.files) == 1
+    _target, sent_path, _kw = client.files[0]
+    assert "22.mp4" in sent_path
+
+    assert db.find_message(-1001, 21).deleted is True
+    assert db.find_message(-1001, 22).deleted is True
+
+    release21.set()
+    await task21
+    db.close()
+
+
+async def test_deletion_concurrent_store_message_deduplication(tmp_path):
+    import asyncio
+    from tests.test_handlers_new import fake_event
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=30, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+    download_calls = []
+
+    async def slow_download(message, file=None):
+        download_calls.append(message.id)
+        download_started.set()
+        await release_download.wait()
+        with open(file, "wb") as fh:
+            fh.write(b"x" * 1024)
+        return file
+
+    client.download_media = slow_download
+
+    task1 = asyncio.create_task(
+        logger.store_message(event.message, peer_id=-1001, is_channel=True, chat_title="c")
+    )
+    await download_started.wait()
+
+    # Second concurrent store_message for the same message
+    task2 = asyncio.create_task(
+        logger.store_message(event.message, peer_id=-1001, is_channel=True, chat_title="c")
+    )
+
+    release_download.set()
+    await task1
+    await task2
+
+    # Download must only have executed once
+    assert len(download_calls) == 1
+    stored = db.find_message(-1001, 30)
+    assert stored is not None
+    assert stored.media_path is not None
+    assert "30.mp4" in stored.media_path
+    db.close()
+
+
+async def test_report_deleted_skips_if_already_deleted_while_waiting(tmp_path):
+    import asyncio
+    from tests.test_handlers_new import fake_event
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=31, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+
+    async def slow_download(message, file=None):
+        download_started.set()
+        await release_download.wait()
+        with open(file, "wb") as fh:
+            fh.write(b"x" * 1024)
+        return file
+
+    client.download_media = slow_download
+
+    new_task = asyncio.create_task(logger.on_new_message(event))
+    await download_started.wait()
+
+    stored = db.find_message(-1001, 31)
+    assert stored is not None
+
+    del_task = asyncio.create_task(logger.report_deleted(stored, source="live"))
+    await asyncio.sleep(0.01)
+
+    # Concurrently marked deleted (e.g. by another handler) while waiting for download
+    db.mark_deleted(-1001, 31)
+
+    release_download.set()
+    await new_task
+    sent = await del_task
+
+    # Report must NOT be sent
+    assert sent is False
+    assert client.sent == []
+    assert client.files == []
+    db.close()
+
+
+async def test_reconcile_waits_for_inflight_download_and_attaches_media(tmp_path):
+    import asyncio
+    from tests.test_handlers_new import fake_event
+
+    logger, client, db = make_logger(tmp_path)
+    file = types.SimpleNamespace(size=1024, ext=".mp4", mime_type="video/mp4")
+    event = fake_event(msg_id=32, media=object(), file=file)
+
+    download_started = asyncio.Event()
+    release_download = asyncio.Event()
+
+    async def slow_download(message, file=None):
+        download_started.set()
+        await release_download.wait()
+        with open(file, "wb") as fh:
+            fh.write(b"x" * 1024)
+        return file
+
+    client.download_media = slow_download
+
+    new_task = asyncio.create_task(logger.on_new_message(event))
+    await download_started.wait()
+
+    # Reconcile sees the message is gone on Telegram (returns [None])
+    async def get_messages(_entity, ids=None):
+        return [None for _ in (ids or [])]
+
+    client.get_messages = get_messages
+
+    rec_task = asyncio.create_task(logger.reconcile_chat(-1001, since_ts=0, budget=10))
+    await asyncio.sleep(0.01)
+
+    # Release download so reconcile can finish
+    release_download.set()
+    await new_task
+    reported = await rec_task
+
+    assert reported == 1
+    assert len(client.files) == 1
+    _target, sent_path, kw = client.files[0]
+    assert "32.mp4" in sent_path
+    assert db.find_message(-1001, 32).deleted is True
+    db.close()
+
+

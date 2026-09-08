@@ -396,6 +396,108 @@ async def test_send_report_with_media(tmp_path):
     db.close()
 
 
+async def test_send_report_gif_passes_animated_attribute(tmp_path):
+    from telethon.tl.types import DocumentAttributeAnimated
+
+    path = tmp_path / "anim.mp4"
+    path.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+    await logger.send_report("gif caption", media_path=str(path), media_type="гиф")
+    assert len(client.files) == 1
+    target, sent_file, kw = client.files[0]
+    assert target == 777
+    assert sent_file == str(path)
+    assert kw["caption"] == "gif caption"
+    attrs = kw.get("attributes")
+    assert attrs is not None
+    assert any(isinstance(a, DocumentAttributeAnimated) for a in attrs)
+    db.close()
+
+
+async def test_send_report_non_gif_does_not_pass_animated_attribute(tmp_path):
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+    await logger.send_report("photo caption", media_path=str(path), media_type="фото")
+    assert len(client.files) == 1
+    _target, _sent_file, kw = client.files[0]
+    assert kw.get("attributes") is None
+    db.close()
+
+
+async def test_media_label_priority():
+    # Telegram GIF has both video and animated attributes (both message.video and message.gif are truthy)
+    gif_msg = types.SimpleNamespace(
+        media=object(),
+        video=object(),
+        gif=object(),
+    )
+    assert MessageLogger._media_label(gif_msg) == "гиф"
+
+    # Telegram video note has both message.video and message.video_note
+    vnote_msg = types.SimpleNamespace(
+        media=object(),
+        video=object(),
+        video_note=object(),
+    )
+    assert MessageLogger._media_label(vnote_msg) == "видеосообщение"
+
+    # Sticker with video attributes
+    sticker_msg = types.SimpleNamespace(
+        media=object(),
+        video=object(),
+        sticker=object(),
+    )
+    assert MessageLogger._media_label(sticker_msg) == "стикер"
+
+    # Standard video
+    video_msg = types.SimpleNamespace(
+        media=object(),
+        video=object(),
+    )
+    assert MessageLogger._media_label(video_msg) == "видео"
+
+
+async def test_send_report_gif_case_insensitive(tmp_path):
+    from telethon.tl.types import DocumentAttributeAnimated
+
+    path = tmp_path / "anim.mp4"
+    path.write_bytes(b"x")
+    logger, client, db = make_logger(tmp_path)
+    await logger.send_report("gif caption", media_path=str(path), media_type="GIF")
+    assert len(client.files) == 1
+    _target, _sent_file, kw = client.files[0]
+    attrs = kw.get("attributes")
+    assert attrs is not None
+    assert any(isinstance(a, DocumentAttributeAnimated) for a in attrs)
+    db.close()
+
+
+async def test_media_label_real_telethon_message_gif():
+    from telethon.tl.types import (
+        MessageMediaDocument,
+        Document,
+        DocumentAttributeAnimated,
+        DocumentAttributeVideo,
+    )
+    from telethon.tl.custom.message import Message
+
+    doc = Document(
+        id=1,
+        access_hash=1,
+        file_reference=b"1",
+        date=None,
+        mime_type="video/mp4",
+        size=100,
+        dc_id=1,
+        attributes=[DocumentAttributeVideo(0, 100, 100), DocumentAttributeAnimated()],
+    )
+    msg = Message(1, peer_id=1)
+    msg.media = MessageMediaDocument(document=doc)
+    assert MessageLogger._media_label(msg) == "гиф"
+
+
+
 async def test_send_report_falls_back_when_media_missing(tmp_path):
     logger, client, db = make_logger(tmp_path)
     await logger.send_report("caption", media_path=str(tmp_path / "gone.jpg"))
