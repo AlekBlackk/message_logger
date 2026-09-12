@@ -31,10 +31,14 @@ class FakeClient:
         return self.entities[ref]
 
     async def send_message(self, target, text, **kw):
+        msg = types.SimpleNamespace(id=len(self.sent) + 1, text=text, **kw)
         self.sent.append((target, text, kw))
+        return msg
 
     async def send_file(self, target, file, **kw):
+        msg = types.SimpleNamespace(id=len(self.files) + 1, file=file, **kw)
         self.files.append((target, file, kw))
+        return msg
 
     def add_event_handler(self, *_a, **_kw):
         pass

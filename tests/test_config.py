@@ -64,6 +64,7 @@ def test_load_config_defaults(tmp_path):
     assert cfg.max_media_mb == 50
     assert cfg.retention_days == 14
     assert cfg.backfill_limit == 200
+    assert cfg.log_reply_media is True
 
 
 def test_max_media_bytes(tmp_path):
@@ -214,6 +215,25 @@ def test_log_joins_typo_raises(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(env)
     assert "LOG_JOINS" in str(exc.value)
+
+
+def test_log_reply_media_defaults_true(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\n")
+    cfg = load_config(env)
+    assert cfg.log_reply_media is True
+
+
+def test_log_reply_media_false(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_REPLY_MEDIA=false\n")
+    cfg = load_config(env)
+    assert cfg.log_reply_media is False
+
+
+def test_log_reply_media_typo_raises(tmp_path):
+    env = _write_env(tmp_path, "API_ID=1\nAPI_HASH=h\nLOG_REPLY_MEDIA=ture\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(env)
+    assert "LOG_REPLY_MEDIA" in str(exc.value)
 
 
 def test_log_level_is_normalised(tmp_path):

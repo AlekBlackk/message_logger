@@ -40,6 +40,7 @@ class Config:
     proxy_type: str
     proxy_host: str
     proxy_port: int
+    log_reply_media: bool = True
 
     @property
     def max_media_bytes(self) -> int:
@@ -197,6 +198,9 @@ def load_config(env_path: str = ".env") -> Config:
         proxy_type=(values.get("PROXY_TYPE") or "socks5").strip(),
         proxy_host=(values.get("PROXY_HOST") or "127.0.0.1").strip(),
         proxy_port=proxy_port,
+        log_reply_media=_as_bool(
+            "LOG_REPLY_MEDIA", values.get("LOG_REPLY_MEDIA") or "", True
+        ),
     )
 
 

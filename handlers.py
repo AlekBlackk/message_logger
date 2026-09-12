@@ -321,15 +321,87 @@ class MessageLogger:
 
     # --- sending ----------------------------------------------------------
 
+    async def _send_reply_media(
+        self,
+        media_path: str,
+        *,
+        media_type: str | None = None,
+        author: str | None = None,
+        reply_to: int | None = None,
+    ) -> None:
+        """Send parent message media in reply to the deletion report."""
+        caption = reports.format_reply_media_caption(media_type, author)
+        send_kw: dict = {
+            "supports_streaming": True,
+        }
+        if caption is not None:
+            send_kw["caption"] = caption
+            send_kw["parse_mode"] = "html"
+        if reply_to is not None:
+            send_kw["reply_to"] = reply_to
+
+        type_lower = (media_type or "").strip().lower()
+        if type_lower in ("видеосообщение", "video_note", "кружочек"):
+            send_kw["video_note"] = True
+        elif type_lower in ("гиф", "gif", "animation"):
+            send_kw["attributes"] = [DocumentAttributeAnimated()]
+        elif type_lower in ("голосовое", "голос", "voice"):
+            send_kw["voice_note"] = True
+
+        try:
+            await self.client.send_file(
+                self.log_target_id,
+                media_path,
+                **send_kw,
+            )
+        except MediaCaptionTooLongError:
+            self.log.warning(
+                "caption too long for reply media, sending without caption"
+            )
+            retry_kw = dict(send_kw)
+            retry_kw.pop("caption", None)
+            retry_kw.pop("parse_mode", None)
+            await self.client.send_file(
+                self.log_target_id,
+                media_path,
+                **retry_kw,
+            )
+        except PhotoInvalidDimensionsError:
+            self.log.warning(
+                "photo dimensions rejected for reply media, resending %s as a document",
+                media_path,
+            )
+            doc_kw = dict(send_kw)
+            doc_kw.pop("supports_streaming", None)
+            doc_kw["force_document"] = True
+            try:
+                await self.client.send_file(
+                    self.log_target_id,
+                    media_path,
+                    **doc_kw,
+                )
+            except MediaCaptionTooLongError:
+                doc_kw.pop("caption", None)
+                doc_kw.pop("parse_mode", None)
+                await self.client.send_file(
+                    self.log_target_id,
+                    media_path,
+                    **doc_kw,
+                )
+
     async def send_report(
         self,
         text: str,
         media_path: str | None = None,
         *,
         media_type: str | None = None,
+        reply_media_path: str | None = None,
+        reply_media_type: str | None = None,
+        reply_media_author: str | None = None,
     ) -> bool:
         for attempt in (1, 2):
             try:
+                sent_msg = None
                 if media_path and os.path.exists(media_path):
                     send_kw: dict = {
                         "caption": text,
@@ -339,7 +411,7 @@ class MessageLogger:
                     if media_type and media_type.lower() in ("гиф", "gif"):
                         send_kw["attributes"] = [DocumentAttributeAnimated()]
                     try:
-                        await self.client.send_file(
+                        sent_msg = await self.client.send_file(
                             self.log_target_id,
                             media_path,
                             **send_kw,
@@ -348,7 +420,7 @@ class MessageLogger:
                         self.log.warning(
                             "caption too long for media, sending report as text-only"
                         )
-                        await self.client.send_message(
+                        sent_msg = await self.client.send_message(
                             self.log_target_id,
                             text,
                             parse_mode="html",
@@ -362,18 +434,45 @@ class MessageLogger:
                         doc_kw = dict(send_kw)
                         doc_kw.pop("supports_streaming", None)
                         doc_kw["force_document"] = True
-                        await self.client.send_file(
+                        sent_msg = await self.client.send_file(
                             self.log_target_id,
                             media_path,
                             **doc_kw,
                         )
                 else:
-                    await self.client.send_message(
+                    sent_msg = await self.client.send_message(
                         self.log_target_id,
                         text,
                         parse_mode="html",
                         link_preview=False,
                     )
+
+                if (
+                    reply_media_path
+                    and os.path.exists(reply_media_path)
+                    and sent_msg is not None
+                ):
+                    try:
+                        reply_target = (
+                            sent_msg[0]
+                            if isinstance(sent_msg, (list, tuple)) and sent_msg
+                            else sent_msg
+                        )
+                        reply_to_id = getattr(reply_target, "id", None) or (
+                            reply_target if isinstance(reply_target, int) else None
+                        )
+                        await self._send_reply_media(
+                            reply_media_path,
+                            media_type=reply_media_type,
+                            author=reply_media_author,
+                            reply_to=reply_to_id,
+                        )
+                    except Exception:
+                        self.log.exception(
+                            "failed to send reply media for report: %s",
+                            reply_media_path,
+                        )
+
                 return True
             except FloodWaitError as exc:
                 if attempt == 2:
@@ -484,6 +583,28 @@ class MessageLogger:
                 # Already reported by a concurrent pass while waiting for download
                 return False
             stored = refreshed
+        reply_media_path = None
+        reply_media_type = None
+        reply_media_author = None
+        if self.config.log_reply_media and stored.reply_to_msg_id:
+            await self._wait_inflight_download(stored.chat_id, stored.reply_to_msg_id)
+            recheck = self.storage.find_message(stored.chat_id, stored.msg_id)
+            if recheck is not None:
+                if recheck.deleted:
+                    # Already reported by a concurrent pass while waiting for parent download
+                    return False
+                stored = recheck
+            parent = self.storage.find_message(stored.chat_id, stored.reply_to_msg_id)
+            if parent is not None and parent.media_path:
+                reply_media_path = parent.media_path
+                reply_media_type = parent.media_type
+                reply_media_author = (
+                    parent.sender_name
+                    or self.sender_name(parent.sender_id)
+                    or (parent.chat_title if parent.is_channel else None)
+                    or (self.chat_title(parent.chat_id) if parent.is_channel else None)
+                )
+
         sent = await self.send_report(
             reports.format_deleted(
                 stored,
@@ -493,6 +614,9 @@ class MessageLogger:
             ),
             media_path=stored.media_path,
             media_type=stored.media_type,
+            reply_media_path=reply_media_path,
+            reply_media_type=reply_media_type,
+            reply_media_author=reply_media_author,
         )
         preview = reports.truncate(stored.text, 80) or (
             f"[{stored.media_type}]" if stored.media_type else ""

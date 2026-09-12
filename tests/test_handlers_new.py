@@ -15,12 +15,19 @@ class FakeClient:
         self.sent = []
         self.files = []
         self.downloads = []
+        self._next_id = 1
 
     async def send_message(self, target, text, **kw):
+        msg = types.SimpleNamespace(id=self._next_id, text=text, **kw)
+        self._next_id += 1
         self.sent.append((target, text, kw))
+        return msg
 
     async def send_file(self, target, file, **kw):
+        msg = types.SimpleNamespace(id=self._next_id, file=file, **kw)
+        self._next_id += 1
         self.files.append((target, file, kw))
+        return msg
 
     async def download_media(self, message, file=None):
         self.downloads.append((message, file))
@@ -47,6 +54,7 @@ def make_config(tmp_path, **kw):
         log_outgoing=True,
         log_edits=True,
         log_joins=True,
+        log_reply_media=True,
         download_media=True,
         max_media_mb=1,
         max_media_total_mb=0,

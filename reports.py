@@ -184,3 +184,51 @@ def format_membership(
         label = "Добавил" if joined else "Удалил"
         lines.append(_who_line(label, actor_name, actor_id, actor_username))
     return "\n".join(lines)
+
+
+_REPLY_MEDIA_LABELS: dict[str, str] = {
+    "фото": "фото",
+    "photo": "фото",
+    "messagemediaphoto": "фото",
+    "видео": "видео",
+    "video": "видео",
+    "messagemediavideo": "видео",
+    "гиф": "гиф",
+    "gif": "гиф",
+    "animation": "гиф",
+    "голос": "голос",
+    "голосовое": "голос",
+    "voice": "голос",
+    "аудио": "аудио",
+    "audio": "аудио",
+    "файл": "файл",
+    "file": "файл",
+    "document": "файл",
+    "документ": "файл",
+    "messagemediadocument": "файл",
+}
+
+_NO_CAPTION_MEDIA_TYPES: set[str] = {
+    "video_note",
+    "видеосообщение",
+    "кружочек",
+    "sticker",
+    "стикер",
+}
+
+
+def format_reply_media_caption(
+    media_type: str | None, author: str | None
+) -> str | None:
+    """Format caption for the parent media sent in reply to a deletion report.
+    Telegram does not support captions for video notes and stickers."""
+    type_lower = (media_type or "").strip().lower()
+    if type_lower in _NO_CAPTION_MEDIA_TYPES:
+        return None
+    type_label = _REPLY_MEDIA_LABELS.get(
+        type_lower, media_type.strip() if media_type else "медиа"
+    )
+    author_clean = (author or "").strip() or "?"
+    author_label = html.escape(author_clean)
+    return f"↩️ В ответ на {html.escape(type_label)} от {author_label}"
+

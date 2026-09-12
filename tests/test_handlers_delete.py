@@ -1,3 +1,4 @@
+import asyncio
 import types
 
 import pytest
@@ -23,24 +24,32 @@ def seed(
     chat_id,
     msg_id,
     is_channel,
+    chat_title="My Chat",
     text="hello",
     media_path=None,
+    media_type=None,
     reply_to_msg_id=None,
     sender_id=42,
+    sender_name="Alice",
     date=1700000000,
     deleted=False,
 ):
+    actual_media_type = (
+        media_type
+        if media_type is not None
+        else ("MessageMediaPhoto" if media_path else None)
+    )
     db.save_message(
         StoredMessage(
             chat_id=chat_id,
             msg_id=msg_id,
             is_channel=is_channel,
-            chat_title="My Chat",
+            chat_title=chat_title,
             sender_id=sender_id,
-            sender_name="Alice",
+            sender_name=sender_name,
             text=text,
             media_path=media_path,
-            media_type="MessageMediaPhoto" if media_path else None,
+            media_type=actual_media_type,
             date=date,
             deleted=deleted,
             reply_to_msg_id=reply_to_msg_id,
@@ -863,5 +872,547 @@ async def test_reconcile_waits_for_inflight_download_and_attaches_media(tmp_path
     assert "32.mp4" in sent_path
     assert db.find_message(-1001, 32).deleted is True
     db.close()
+
+
+async def test_deletion_sends_reply_media(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent-photo")
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        text="parent text",
+        media_path=str(parent_media),
+        media_type="фото",
+        sender_name="Alice",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert "child text" in client.sent[0][1]
+    assert len(client.files) == 1
+    target, file_path, kw = client.files[0]
+    assert target == logger.log_target_id
+    assert file_path == str(parent_media)
+    assert kw["reply_to"] == 1
+    assert kw["caption"] == "↩️ В ответ на фото от Alice"
+    assert kw["parse_mode"] == "html"
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_sends_reply_media_when_both_have_media(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.mp4"
+    parent_media.write_bytes(b"parent-video")
+    child_media = tmp_path / "child.jpg"
+    child_media.write_bytes(b"child-photo")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(parent_media),
+        media_type="видео",
+        sender_name="Bob",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        media_path=str(child_media),
+        media_type="фото",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert client.sent == []
+    assert len(client.files) == 2
+    # First file: child deletion report with caption
+    assert client.files[0][1] == str(child_media)
+    assert "Удалённое сообщение" in client.files[0][2]["caption"]
+    # Second file: parent media replied to first file
+    assert client.files[1][1] == str(parent_media)
+    assert client.files[1][2]["reply_to"] == 1
+    assert client.files[1][2]["caption"] == "↩️ В ответ на видео от Bob"
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_skips_reply_media_when_config_disabled(tmp_path):
+    logger, client, db = make_logger(tmp_path, log_reply_media=False)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent-photo")
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(parent_media),
+        media_type="фото",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert client.files == []
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_skips_reply_media_when_file_missing(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    missing_media = tmp_path / "missing.jpg"
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(missing_media),
+        media_type="фото",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert client.files == []
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_reply_media_video_note_no_caption(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    note_media = tmp_path / "note.mp4"
+    note_media.write_bytes(b"note-content")
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(note_media),
+        media_type="видеосообщение",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert len(client.files) == 1
+    _target, file_path, kw = client.files[0]
+    assert file_path == str(note_media)
+    assert kw.get("reply_to") == 1
+    assert "caption" not in kw or kw.get("caption") is None
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_reply_media_sticker_no_caption(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    sticker_media = tmp_path / "sticker.webp"
+    sticker_media.write_bytes(b"sticker-content")
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(sticker_media),
+        media_type="стикер",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert len(client.files) == 1
+    _target, file_path, kw = client.files[0]
+    assert file_path == str(sticker_media)
+    assert kw.get("reply_to") == 1
+    assert "caption" not in kw or kw.get("caption") is None
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_reply_media_error_isolation(tmp_path, caplog):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent-photo")
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(parent_media),
+        media_type="фото",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    async def failing_send_file(_target, _file, **_kw):
+        raise RuntimeError("Telegram media upload exploded")
+
+    client.send_file = failing_send_file
+
+    with caplog.at_level("ERROR"):
+        await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert db.find_message(-1001, 5).deleted is True
+    assert any("failed to send reply media" in r.message for r in caplog.records)
+    db.close()
+
+
+async def test_deletion_waits_for_parent_inflight_download(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent-bytes")
+
+    # Parent message cached with media_path=None initially
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=None,
+        media_type="фото",
+        sender_name="Alice",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    download_event = asyncio.Event()
+    logger._inflight_downloads[(-1001, 1)] = download_event
+
+    del_task = asyncio.create_task(
+        logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    )
+    await asyncio.sleep(0.02)
+
+    # Deletion task is waiting on download_event; no report yet
+    assert client.sent == []
+    assert client.files == []
+
+    # Finish background download
+    db.update_media_path(-1001, 1, str(parent_media), len(b"parent-bytes"))
+    download_event.set()
+    await del_task
+
+    assert len(client.sent) == 1
+    assert len(client.files) == 1
+    assert client.files[0][1] == str(parent_media)
+    assert client.files[0][2]["reply_to"] == 1
+    assert client.files[0][2]["caption"] == "↩️ В ответ на фото от Alice"
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_skips_if_already_deleted_while_waiting_for_parent_download(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent-bytes")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=None,
+        media_type="фото",
+        sender_name="Alice",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text",
+        reply_to_msg_id=1,
+    )
+
+    download_event = asyncio.Event()
+    logger._inflight_downloads[(-1001, 1)] = download_event
+
+    stored = db.find_message(-1001, 5)
+    del_task = asyncio.create_task(
+        logger.report_deleted(stored, source="live")
+    )
+    await asyncio.sleep(0.02)
+
+    # Concurrently reported/marked deleted by another pass (e.g. reconcile)
+    db.mark_deleted(-1001, 5)
+
+    # Finish parent download
+    db.update_media_path(-1001, 1, str(parent_media), len(b"parent-bytes"))
+    download_event.set()
+    sent = await del_task
+
+    # Must return False and send NO reports
+    assert sent is False
+    assert client.sent == []
+    assert client.files == []
+    db.close()
+
+
+async def test_deletion_reply_media_author_fallback_to_cache_and_channel(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media1 = tmp_path / "parent1.jpg"
+    parent_media1.write_bytes(b"parent1")
+    parent_media2 = tmp_path / "parent2.jpg"
+    parent_media2.write_bytes(b"parent2")
+
+    # Parent 1: sender_name in DB is None, but present in logger._names
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(parent_media1),
+        media_type="фото",
+        sender_id=777,
+        sender_name=None,
+    )
+    logger._names[777] = "CachedAlice"
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child text 1",
+        reply_to_msg_id=1,
+    )
+
+    # Parent 2: channel post, sender_name is None, chat_title is "News Channel"
+    seed(
+        db,
+        chat_id=-1002,
+        msg_id=10,
+        is_channel=True,
+        chat_title="News Channel",
+        media_path=str(parent_media2),
+        media_type="видео",
+        sender_id=None,
+        sender_name=None,
+    )
+    seed(
+        db,
+        chat_id=-1002,
+        msg_id=15,
+        is_channel=True,
+        text="child text 2",
+        reply_to_msg_id=10,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+    await logger.on_message_deleted(delete_event([15], chat_id=-1002))
+
+    assert len(client.files) == 2
+    # First: from CachedAlice
+    assert client.files[0][2]["caption"] == "↩️ В ответ на фото от CachedAlice"
+    # Second: from News Channel
+    assert client.files[1][2]["caption"] == "↩️ В ответ на видео от News Channel"
+    db.close()
+
+
+async def test_deletion_reply_media_video_note_flag(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    note_media = tmp_path / "round.mp4"
+    note_media.write_bytes(b"round")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(note_media),
+        media_type="кружочек",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.files) == 1
+    _target, _path, kw = client.files[0]
+    assert kw.get("video_note") is True
+    assert "caption" not in kw or kw.get("caption") is None
+    db.close()
+
+
+async def test_deletion_reply_media_voice_note(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    voice_media = tmp_path / "voice.ogg"
+    voice_media.write_bytes(b"voice")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(voice_media),
+        media_type="голос",
+        sender_name="David",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child",
+        reply_to_msg_id=1,
+    )
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.files) == 1
+    _target, _path, kw = client.files[0]
+    assert kw.get("voice_note") is True
+    assert kw.get("caption") == "↩️ В ответ на голос от David"
+    db.close()
+
+
+async def test_deletion_reply_media_photo_invalid_dimensions(tmp_path):
+    from telethon.errors import PhotoInvalidDimensionsError
+
+    logger, client, db = make_logger(tmp_path)
+    bad_photo = tmp_path / "bad.jpg"
+    bad_photo.write_bytes(b"bad-photo")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(bad_photo),
+        media_type="фото",
+        sender_name="Eve",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child",
+        reply_to_msg_id=1,
+    )
+
+    original_send_file = client.send_file
+    calls = []
+
+    async def flaky_send_file(target, file, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise PhotoInvalidDimensionsError(request=None)
+        return await original_send_file(target, file, **kw)
+
+    client.send_file = flaky_send_file
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(calls) == 2
+    assert calls[1].get("force_document") is True
+    assert calls[1].get("caption") == "↩️ В ответ на фото от Eve"
+    assert db.find_message(-1001, 5).deleted is True
+    db.close()
+
+
+async def test_deletion_reply_media_when_sent_msg_is_list(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    parent_media = tmp_path / "parent.jpg"
+    parent_media.write_bytes(b"parent")
+
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=1,
+        is_channel=True,
+        media_path=str(parent_media),
+        media_type="фото",
+        sender_name="Frank",
+    )
+    seed(
+        db,
+        chat_id=-1001,
+        msg_id=5,
+        is_channel=True,
+        text="child",
+        reply_to_msg_id=1,
+    )
+
+    async def send_message_returning_list(target, text, **kw):
+        client.sent.append((target, text, kw))
+        return [types.SimpleNamespace(id=99, text=text, **kw)]
+
+    client.send_message = send_message_returning_list
+
+    await logger.on_message_deleted(delete_event([5], chat_id=-1001))
+
+    assert len(client.sent) == 1
+    assert len(client.files) == 1
+    assert client.files[0][2]["reply_to"] == 99
+    db.close()
+
 
 

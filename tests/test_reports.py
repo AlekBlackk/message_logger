@@ -3,6 +3,7 @@ from reports import (
     format_deleted,
     format_edited,
     format_membership,
+    format_reply_media_caption,
     format_stats,
     truncate,
 )
@@ -214,3 +215,29 @@ def test_format_membership_escapes_html():
     assert "<script>" not in out
     assert "&lt;script&gt;" in out
     assert "a&amp;b" in out
+
+
+def test_format_reply_media_caption():
+    assert format_reply_media_caption("фото", "Alice") == "↩️ В ответ на фото от Alice"
+    assert format_reply_media_caption("видео", "Bob") == "↩️ В ответ на видео от Bob"
+    assert format_reply_media_caption("гиф", "Charlie") == "↩️ В ответ на гиф от Charlie"
+    assert format_reply_media_caption("animation", "Charlie") == "↩️ В ответ на гиф от Charlie"
+    assert format_reply_media_caption("голос", "David") == "↩️ В ответ на голос от David"
+    assert format_reply_media_caption("голосовое", "Eve") == "↩️ В ответ на голос от Eve"
+    assert format_reply_media_caption("файл", "Frank") == "↩️ В ответ на файл от Frank"
+    assert format_reply_media_caption("документ", "Frank") == "↩️ В ответ на файл от Frank"
+    assert format_reply_media_caption("video_note", "Grace") is None
+    assert format_reply_media_caption("  video_note  ", "Grace") is None
+    assert format_reply_media_caption("видеосообщение", "Grace") is None
+    assert format_reply_media_caption("кружочек", "Grace") is None
+    assert format_reply_media_caption("sticker", "Heidi") is None
+    assert format_reply_media_caption("стикер", "Heidi") is None
+    assert format_reply_media_caption(" стикер \n", "Heidi") is None
+    assert format_reply_media_caption(None, "Ivan") == "↩️ В ответ на медиа от Ivan"
+    assert format_reply_media_caption("фото", None) == "↩️ В ответ на фото от ?"
+    assert format_reply_media_caption("фото", "   ") == "↩️ В ответ на фото от ?"
+    assert (
+        format_reply_media_caption("фото", "<b>Alice</b>")
+        == "↩️ В ответ на фото от &lt;b&gt;Alice&lt;/b&gt;"
+    )
+
