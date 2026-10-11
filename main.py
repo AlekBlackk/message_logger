@@ -294,7 +294,11 @@ async def run_account(label: str, cfg: Config, stop: asyncio.Event) -> bool:
         # client.disconnected (not is_connected()) is the exit signal — it
         # resolves only once Telethon has given up reconnecting, so a transient
         # network drop no longer shuts the bot down.
-        while not stop.is_set() and not client.disconnected.done():
+        # Read the property once: every access wraps the sender's future in a
+        # new asyncio.shield() whose done-callback stays attached until the
+        # future resolves, so polling the property leaks ~1 callback per second.
+        disconnected = client.disconnected
+        while not stop.is_set() and not disconnected.done():
             await asyncio.sleep(1)
         ok = True
     except Exception:
