@@ -102,12 +102,17 @@ async def load_watch_ids(client, storage: Storage, cfg: Config) -> set[int]:
 def build_client(cfg: Config) -> TelegramClient:
     # catch_up=True makes Telethon fetch the updates missed while the process
     # was down; without it every deletion during a restart is lost for good.
+    # connection_retries=-1 retries forever: with the default of 5, a short
+    # DNS/network outage makes Telethon give up, the account stops for good
+    # and — as run_all() keeps the process alive for its siblings — systemd
+    # never restarts it.
     return TelegramClient(
         cfg.session_name,
         cfg.api_id,
         cfg.api_hash,
         proxy=cfg.proxy_dict(),
         catch_up=True,
+        connection_retries=-1,
     )
 
 

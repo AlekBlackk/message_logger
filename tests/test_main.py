@@ -418,3 +418,10 @@ def test_main_does_not_exit_when_one_account_succeeds(monkeypatch):
     monkeypatch.setattr(main, "run_all", fake_run_all)
 
     main.main()  # must not raise
+
+
+def test_build_client_retries_connection_forever(tmp_path):
+    """Telethon's default of 5 retries lets a short network outage kill an
+    account for good; -1 keeps it reconnecting."""
+    client = main.build_client(make_config(tmp_path, session_name=str(tmp_path / "s")))
+    assert client._connection_retries == -1
