@@ -523,3 +523,44 @@ async def test_help_does_not_touch_storage(tmp_path):
     await handler.on_command(FakeEvent("/help"))
     assert db.list_watch() == [(-1001, "Chat A", 1000)]
     db.close()
+
+
+async def test_sent_reports_are_tracked_per_account_db(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.logger.send_report("one")
+    await handler.logger.send_report("two")
+    assert db.report_message_ids() == [1, 2]
+    db.close()
+
+
+async def test_clear_deletes_only_tracked_reports_and_the_command(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    deleted = []
+
+    async def fake_delete(target, ids):
+        deleted.append((target, sorted(ids)))
+
+    client.delete_messages = fake_delete
+    await handler.logger.send_report("report")
+    await handler.logger.send_report("report 2")
+    event = FakeEvent("/clear")
+    event.message.id = 500
+    await handler.on_command(event)
+    assert deleted == [(777, [1, 2, 500])]
+    assert db.report_message_ids() == []
+    db.close()
+
+
+async def test_clear_ignores_commands_from_others(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.logger.send_report("report")
+    await handler.on_command(FakeEvent("/clear", out=False))
+    assert db.report_message_ids() == [1]
+    db.close()
+
+
+async def test_clear_with_nothing_tracked_says_so(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    await handler.on_command(FakeEvent("/clear"))
+    assert "Нечего" in client.sent[-1][1]
+    db.close()

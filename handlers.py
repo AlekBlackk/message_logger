@@ -321,6 +321,24 @@ class MessageLogger:
 
     # --- sending ----------------------------------------------------------
 
+    def _track_report(self, sent) -> None:
+        """Remember what we put in LOG_TARGET so /clear can later delete exactly
+        these messages. send_file returns a list for albums."""
+        for msg in sent if isinstance(sent, (list, tuple)) else [sent]:
+            msg_id = getattr(msg, "id", None)
+            if isinstance(msg_id, int):
+                self.storage.add_report_message(msg_id)
+
+    async def _send_file(self, *args, **kwargs):
+        sent = await self.client.send_file(*args, **kwargs)
+        self._track_report(sent)
+        return sent
+
+    async def _send_message(self, *args, **kwargs):
+        sent = await self.client.send_message(*args, **kwargs)
+        self._track_report(sent)
+        return sent
+
     async def _send_reply_media(
         self,
         media_path: str,
@@ -349,7 +367,7 @@ class MessageLogger:
             send_kw["voice_note"] = True
 
         try:
-            await self.client.send_file(
+            await self._send_file(
                 self.log_target_id,
                 media_path,
                 **send_kw,
@@ -361,7 +379,7 @@ class MessageLogger:
             retry_kw = dict(send_kw)
             retry_kw.pop("caption", None)
             retry_kw.pop("parse_mode", None)
-            await self.client.send_file(
+            await self._send_file(
                 self.log_target_id,
                 media_path,
                 **retry_kw,
@@ -375,7 +393,7 @@ class MessageLogger:
             doc_kw.pop("supports_streaming", None)
             doc_kw["force_document"] = True
             try:
-                await self.client.send_file(
+                await self._send_file(
                     self.log_target_id,
                     media_path,
                     **doc_kw,
@@ -383,7 +401,7 @@ class MessageLogger:
             except MediaCaptionTooLongError:
                 doc_kw.pop("caption", None)
                 doc_kw.pop("parse_mode", None)
-                await self.client.send_file(
+                await self._send_file(
                     self.log_target_id,
                     media_path,
                     **doc_kw,
@@ -411,7 +429,7 @@ class MessageLogger:
                     if media_type and media_type.lower() in ("гиф", "gif"):
                         send_kw["attributes"] = [DocumentAttributeAnimated()]
                     try:
-                        sent_msg = await self.client.send_file(
+                        sent_msg = await self._send_file(
                             self.log_target_id,
                             media_path,
                             **send_kw,
@@ -420,7 +438,7 @@ class MessageLogger:
                         self.log.warning(
                             "caption too long for media, sending report as text-only"
                         )
-                        sent_msg = await self.client.send_message(
+                        sent_msg = await self._send_message(
                             self.log_target_id,
                             text,
                             parse_mode="html",
@@ -434,13 +452,13 @@ class MessageLogger:
                         doc_kw = dict(send_kw)
                         doc_kw.pop("supports_streaming", None)
                         doc_kw["force_document"] = True
-                        sent_msg = await self.client.send_file(
+                        sent_msg = await self._send_file(
                             self.log_target_id,
                             media_path,
                             **doc_kw,
                         )
                 else:
-                    sent_msg = await self.client.send_message(
+                    sent_msg = await self._send_message(
                         self.log_target_id,
                         text,
                         parse_mode="html",

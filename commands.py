@@ -1,4 +1,4 @@
-"""Runtime commands sent to the log target: /watch, /unwatch, /list, /purge, /help."""
+"""Runtime commands sent to the log target: /watch, /unwatch, /list, /purge, /clear, /help."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from storage import Storage
 log = logging.getLogger(__name__)
 
 _COMMAND_RE = re.compile(
-    r"^/(watch|unwatch|list|purge|stats|help)\b\s*(.*)$", re.IGNORECASE
+    r"^/(watch|unwatch|list|purge|clear|stats|help)\b\s*(.*)$", re.IGNORECASE
 )
 
 # Leaves headroom under Telegram's 4096-char message cap for the header line
@@ -48,6 +48,7 @@ _HELP_TEXT = (
     "/list — список отслеживаемых чатов\n"
     "/purge <дни|@chat> [дни] [confirm] — очистить сообщения из БД, "
     "подробности: /purge без аргументов\n"
+    "/clear — удалить из этого чата отчёты бота (чужие сообщения и заметки не трогает)\n"
     "/stats — статистика кеша (сообщения, чаты, размер БД и медиа)\n"
     "/help — эта справка"
 )
@@ -106,6 +107,8 @@ class CommandHandler:
             await self._unwatch(event, arg)
         elif command == "purge":
             await self._purge(event, arg)
+        elif command == "clear":
+            await self._clear(event)
         elif command == "stats":
             await self._stats()
         elif command == "help":
@@ -277,6 +280,26 @@ class CommandHandler:
             f"✅ Удалено {count} сообщений, медиафайлов удалено {removed} "
             f"из {media_count}{orphan_result} — {scope_label}{age_desc}."
         )
+
+    async def _clear(self, event) -> None:
+        """Delete the reports this account's bot sent to LOG_TARGET, plus the
+        /clear command itself. Only ids recorded in report_messages are touched,
+        so the user's own notes in Saved Messages are never at risk."""
+        report_ids = self.storage.report_message_ids()
+        if not report_ids:
+            await self.logger.send_report("Нечего чистить: отчётов бота нет.")
+            return
+        to_delete = list(report_ids)
+        command_id = getattr(event.message, "id", None)
+        if command_id is not None:
+            to_delete.append(command_id)
+        try:
+            await self.client.delete_messages(self.log_target_id, to_delete)
+        except Exception as exc:
+            log.exception("clear: cannot delete reports")
+            await self.logger.send_report(f"⚠️ /clear: {exc}")
+            return
+        self.storage.forget_report_messages(report_ids)
 
     def _find_orphans(self) -> list[Path]:
         """Media files on disk with no matching media_path in any row —

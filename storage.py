@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS watch_chats (
     label    TEXT,
     added_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS report_messages (
+    msg_id INTEGER PRIMARY KEY
+);
 """
 
 _COLUMNS = (
@@ -284,6 +288,27 @@ class Storage:
             "SELECT chat_id, label, added_at FROM watch_chats ORDER BY added_at ASC"
         ).fetchall()
         return [(r["chat_id"], r["label"], r["added_at"]) for r in rows]
+
+    # Ids of messages this account's bot sent to LOG_TARGET, so /clear removes
+    # only its own reports and never the user's notes. Each account has its own
+    # DB, which is what keeps one account's /clear away from another's reports.
+    def add_report_message(self, msg_id: int) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO report_messages (msg_id) VALUES (?)", (msg_id,)
+        )
+        self.conn.commit()
+
+    def report_message_ids(self) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT msg_id FROM report_messages ORDER BY msg_id ASC"
+        ).fetchall()
+        return [r["msg_id"] for r in rows]
+
+    def forget_report_messages(self, msg_ids: list[int]) -> None:
+        self.conn.executemany(
+            "DELETE FROM report_messages WHERE msg_id = ?", [(i,) for i in msg_ids]
+        )
+        self.conn.commit()
 
     def purge_older_than(self, cutoff_ts: int) -> tuple[int, list[str]]:
         """Drop rows older than cutoff_ts, returning (rows purged, media paths to unlink)."""

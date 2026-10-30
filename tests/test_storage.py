@@ -402,3 +402,14 @@ def test_stats_empty_db(tmp_path):
     assert stats["newest_date"] is None
     assert stats["top_chats"] == []
     db.close()
+
+
+def test_report_message_ids_roundtrip_and_forget(tmp_path):
+    db = open_db(tmp_path)
+    db.add_report_message(10)
+    db.add_report_message(11)
+    db.add_report_message(10)  # re-adding is harmless
+    assert sorted(db.report_message_ids()) == [10, 11]
+    db.forget_report_messages([10])
+    assert db.report_message_ids() == [11]
+    db.close()
