@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from storage import StoredMessage, Storage
@@ -406,10 +408,34 @@ def test_stats_empty_db(tmp_path):
 
 def test_report_message_ids_roundtrip_and_forget(tmp_path):
     db = open_db(tmp_path)
-    db.add_report_message(10)
-    db.add_report_message(11)
-    db.add_report_message(10)  # re-adding is harmless
+    db.add_report_message(10, 1000)
+    db.add_report_message(11, 2000)
+    db.add_report_message(10, 1000)  # re-adding is harmless
     assert sorted(db.report_message_ids()) == [10, 11]
     db.forget_report_messages([10])
     assert db.report_message_ids() == [11]
+    db.close()
+
+
+def test_report_message_ids_since_filters_by_date_and_skips_undated(tmp_path):
+    db = open_db(tmp_path)
+    db.add_report_message(1, 1000)
+    db.add_report_message(2, 2000)
+    db.conn.execute("INSERT INTO report_messages (msg_id) VALUES (3)")  # legacy row
+    assert db.report_message_ids(since_ts=1500) == [2]
+    assert db.report_message_ids() == [1, 2, 3]
+    db.close()
+
+
+def test_report_messages_table_gains_date_column_on_old_db(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE report_messages (msg_id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO report_messages (msg_id) VALUES (5)")
+    conn.commit()
+    conn.close()
+    db = Storage(path)
+    assert db.report_message_ids() == [5]
+    db.add_report_message(6, 123)
+    assert db.report_message_ids(since_ts=100) == [6]
     db.close()

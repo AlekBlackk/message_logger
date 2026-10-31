@@ -559,6 +559,35 @@ async def test_clear_ignores_commands_from_others(tmp_path):
     db.close()
 
 
+async def test_clear_with_days_deletes_only_recent_reports(tmp_path):
+    handler, client, db, _calls = make_handler(tmp_path)
+    deleted = []
+
+    async def fake_delete(target, ids):
+        deleted.append(sorted(ids))
+
+    client.delete_messages = fake_delete
+    now = int(time.time())
+    db.add_report_message(10, now - 3 * 86400)  # older than a day
+    db.add_report_message(11, now - 3600)
+    event = FakeEvent("/clear 1")
+    event.message.id = 500
+    await handler.on_command(event)
+    assert deleted == [[11, 500]]
+    assert db.report_message_ids() == [10]
+    db.close()
+
+
+@pytest.mark.parametrize("arg", ["0", "-1", "abc", "36501"])
+async def test_clear_rejects_bad_day_count(tmp_path, arg):
+    handler, client, db, _calls = make_handler(tmp_path)
+    db.add_report_message(10, int(time.time()))
+    await handler.on_command(FakeEvent(f"/clear {arg}"))
+    assert "/clear" in client.sent[-1][1]
+    assert db.report_message_ids() == [1, 10]  # report about the bad arg is tracked too
+    db.close()
+
+
 async def test_clear_with_nothing_tracked_says_so(tmp_path):
     handler, client, db, _calls = make_handler(tmp_path)
     await handler.on_command(FakeEvent("/clear"))

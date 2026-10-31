@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS watch_chats (
 );
 
 CREATE TABLE IF NOT EXISTS report_messages (
-    msg_id INTEGER PRIMARY KEY
+    msg_id INTEGER PRIMARY KEY,
+    date   INTEGER
 );
 """
 
@@ -91,6 +92,11 @@ class Storage:
             self.conn.execute("ALTER TABLE messages ADD COLUMN media_size INTEGER")
         if "reply_to_msg_id" not in cols:
             self.conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
+        report_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(report_messages)")
+        }
+        if "date" not in report_cols:
+            self.conn.execute("ALTER TABLE report_messages ADD COLUMN date INTEGER")
 
     # An overwrite refreshes the content columns only. deleted, media_path and
     # media_size describe what we already know and did about the message, and
@@ -292,16 +298,26 @@ class Storage:
     # Ids of messages this account's bot sent to LOG_TARGET, so /clear removes
     # only its own reports and never the user's notes. Each account has its own
     # DB, which is what keeps one account's /clear away from another's reports.
-    def add_report_message(self, msg_id: int) -> None:
+    def add_report_message(self, msg_id: int, date: int) -> None:
         self.conn.execute(
-            "INSERT OR IGNORE INTO report_messages (msg_id) VALUES (?)", (msg_id,)
+            "INSERT OR IGNORE INTO report_messages (msg_id, date) VALUES (?, ?)",
+            (msg_id, date),
         )
         self.conn.commit()
 
-    def report_message_ids(self) -> list[int]:
-        rows = self.conn.execute(
-            "SELECT msg_id FROM report_messages ORDER BY msg_id ASC"
-        ).fetchall()
+    def report_message_ids(self, since_ts: int | None = None) -> list[int]:
+        """Tracked report ids, optionally only those sent at or after since_ts.
+        Rows tracked before dates were recorded have date NULL and only ever
+        match the unfiltered call."""
+        if since_ts is None:
+            rows = self.conn.execute(
+                "SELECT msg_id FROM report_messages ORDER BY msg_id ASC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT msg_id FROM report_messages WHERE date >= ? ORDER BY msg_id ASC",
+                (since_ts,),
+            ).fetchall()
         return [r["msg_id"] for r in rows]
 
     def forget_report_messages(self, msg_ids: list[int]) -> None:

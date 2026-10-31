@@ -327,7 +327,7 @@ class MessageLogger:
         for msg in sent if isinstance(sent, (list, tuple)) else [sent]:
             msg_id = getattr(msg, "id", None)
             if isinstance(msg_id, int):
-                self.storage.add_report_message(msg_id)
+                self.storage.add_report_message(msg_id, int(time.time()))
 
     async def _send_file(self, *args, **kwargs):
         sent = await self.client.send_file(*args, **kwargs)

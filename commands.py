@@ -48,7 +48,8 @@ _HELP_TEXT = (
     "/list — список отслеживаемых чатов\n"
     "/purge <дни|@chat> [дни] [confirm] — очистить сообщения из БД, "
     "подробности: /purge без аргументов\n"
-    "/clear — удалить из этого чата отчёты бота (чужие сообщения и заметки не трогает)\n"
+    "/clear [дни] — удалить отчёты бота из этого чата: все или за последние N дней "
+    "(заметки и чужие сообщения не трогает)\n"
     "/stats — статистика кеша (сообщения, чаты, размер БД и медиа)\n"
     "/help — эта справка"
 )
@@ -108,7 +109,7 @@ class CommandHandler:
         elif command == "purge":
             await self._purge(event, arg)
         elif command == "clear":
-            await self._clear(event)
+            await self._clear(event, arg)
         elif command == "stats":
             await self._stats()
         elif command == "help":
@@ -281,13 +282,22 @@ class CommandHandler:
             f"из {media_count}{orphan_result} — {scope_label}{age_desc}."
         )
 
-    async def _clear(self, event) -> None:
+    async def _clear(self, event, arg: str) -> None:
         """Delete the reports this account's bot sent to LOG_TARGET, plus the
         /clear command itself. Only ids recorded in report_messages are touched,
-        so the user's own notes in Saved Messages are never at risk."""
-        report_ids = self.storage.report_message_ids()
+        so the user's own notes in Saved Messages are never at risk. Like /purge,
+        a day count means "the last N days"."""
+        since_ts: int | None = None
+        if arg:
+            if not _is_int(arg) or not 1 <= int(arg) <= _PURGE_MAX_DAYS:
+                await self.logger.send_report(
+                    f"⚠️ /clear: дни — число от 1 до {_PURGE_MAX_DAYS}"
+                )
+                return
+            since_ts = int(time.time()) - int(arg) * 86400
+        report_ids = self.storage.report_message_ids(since_ts)
         if not report_ids:
-            await self.logger.send_report("Нечего чистить: отчётов бота нет.")
+            await self.logger.send_report("Нечего чистить: подходящих отчётов бота нет.")
             return
         to_delete = list(report_ids)
         command_id = getattr(event.message, "id", None)
