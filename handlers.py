@@ -66,6 +66,7 @@ class MessageLogger:
         self._sender_usernames: dict[int, str] = {}
         self.recent_deletions: dict[tuple[int, int], float] = {}
         self._inflight_downloads: dict[tuple[int, int], asyncio.Event] = {}
+        self._inflight_deletion_reports: set[tuple[int, int]] = set()
 
     def record_deletion(self, chat_id: int, msg_id: int) -> None:
         now = time.time()
@@ -546,12 +547,17 @@ class MessageLogger:
                 return
             edit_date = getattr(event.message, "edit_date", None)
             edited_at = int((edit_date or event.message.date).timestamp())
+            history = self.storage.get_edits(peer_id, event.message.id)
+            if history and history[-1] == (previous.text, new_text, edited_at):
+                # A replay of the original message can restore the old cached text.
+                self.storage.update_text(peer_id, event.message.id, new_text)
+                return
             self.storage.add_edit(
                 peer_id, event.message.id, previous.text, new_text, edited_at
             )
             self.storage.update_text(peer_id, event.message.id, new_text)
             if self.config.log_edits:
-                await self.send_report(
+                sent = await self.send_report(
                     reports.format_edited(
                         previous,
                         previous.text,
@@ -561,6 +567,8 @@ class MessageLogger:
                         reply_preview=self.reply_preview(peer_id, previous.reply_to_msg_id),
                     )
                 )
+                if sent:
+                    self.log.info("edit reported: chat %s msg %s", peer_id, event.message.id)
         except Exception:
             self.log.exception("on_message_edited failed")
 
@@ -591,6 +599,16 @@ class MessageLogger:
             )
 
     async def report_deleted(self, stored: StoredMessage, *, source: str) -> bool:
+        key = (stored.chat_id, stored.msg_id)
+        if key in self._inflight_deletion_reports:
+            return False
+        self._inflight_deletion_reports.add(key)
+        try:
+            return await self._send_deletion_report(stored, source=source)
+        finally:
+            self._inflight_deletion_reports.remove(key)
+
+    async def _send_deletion_report(self, stored: StoredMessage, *, source: str) -> bool:
         """Send one deletion report. The row is marked deleted only once the
         report is out, so a failed send is retried by the next reconcile pass
         instead of being silently swallowed."""

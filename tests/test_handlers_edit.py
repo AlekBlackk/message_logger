@@ -110,3 +110,16 @@ async def test_edit_records_edit_date_not_send_date(tmp_path):
     edits = db.get_edits(-1001, 5)
     assert edits == [("old", "new", 1700005000)]
     db.close()
+
+
+async def test_replayed_edit_after_cache_replay_is_not_reported_twice(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db)
+    event = fake_event(text="new")
+    await logger.on_message_edited(event)
+    db.update_text(-1001, 5, "old")
+    await logger.on_message_edited(event)
+    assert len(client.sent) == 1
+    assert db.get_edits(-1001, 5) == [("old", "new", 1700000000)]
+    assert db.find_message(-1001, 5).text == "new"
+    db.close()

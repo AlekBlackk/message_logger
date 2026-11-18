@@ -1416,3 +1416,27 @@ async def test_deletion_reply_media_when_sent_msg_is_list(tmp_path):
 
 
 
+
+
+async def test_live_and_reconcile_send_only_one_report(tmp_path):
+    logger, client, db = make_logger(tmp_path)
+    seed(db, chat_id=-1001, msg_id=5, is_channel=True)
+    stored = db.find_message(-1001, 5)
+    original_send = logger.send_report
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_send(*args, **kwargs):
+        sending.set()
+        await release.wait()
+        return await original_send(*args, **kwargs)
+
+    logger.send_report = slow_send
+    live = asyncio.create_task(logger.report_deleted(stored, source="live"))
+    await sending.wait()
+    reconcile = asyncio.create_task(logger.report_deleted(stored, source="reconcile"))
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.gather(live, reconcile) == [True, False]
+    assert len(client.sent) == 1
+    db.close()
